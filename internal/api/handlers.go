@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -209,3 +210,84 @@ func (h *Handler) LiveStream(c *websocket.Conn) {
 		}
 	}
 }
+
+// GET /api/traces/:id/diagnostics
+func (h *Handler) GetTraceDiagnostics(c *fiber.Ctx) error {
+	traceID := c.Params("id")
+	trace, err := h.store.GetTrace(traceID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	report := AnalyzeTrace(trace)
+	return c.JSON(report)
+}
+
+// GET /api/metrics/database
+func (h *Handler) GetDatabaseMetrics(c *fiber.Ctx) error {
+	namespace := c.Query("namespace", "")
+
+	spans := h.store.GetRecentSpans(namespace)
+
+	type key struct {
+		query   string
+		service string
+	}
+	metricsMap := make(map[key]*DatabaseQueryMetric)
+
+	for _, span := range spans {
+		dbSystem, hasSystem := span.Attributes["db.system"]
+		dbStatement, hasStatement := span.Attributes["db.statement"]
+
+		if !hasSystem && !hasStatement {
+			continue
+		}
+
+		query := dbStatement
+		if query == "" {
+			query = span.Name
+		}
+
+		system := dbSystem
+		if system == "" {
+			system = "unknown"
+		}
+
+		k := key{query: query, service: span.ServiceName}
+		m, ok := metricsMap[k]
+		if !ok {
+			m = &DatabaseQueryMetric{
+				Query:     query,
+				System:    system,
+				Service:   span.ServiceName,
+				Namespace: span.Namespace,
+			}
+			metricsMap[k] = m
+		}
+
+		m.CallCount++
+		if span.Status == models.SpanStatusError {
+			m.ErrorCount++
+		}
+
+		if span.DurationMs > m.MaxDurationMs {
+			m.MaxDurationMs = span.DurationMs
+		}
+		m.AvgDurationMs += span.DurationMs
+	}
+
+	var result []*DatabaseQueryMetric
+	for _, m := range metricsMap {
+		if m.CallCount > 0 {
+			m.AvgDurationMs = m.AvgDurationMs / float64(m.CallCount)
+			m.ErrorRate = (float64(m.ErrorCount) / float64(m.CallCount)) * 100.0
+		}
+		result = append(result, m)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].AvgDurationMs > result[j].AvgDurationMs
+	})
+
+	return c.JSON(fiber.Map{"metrics": result})
+}
+

@@ -485,3 +485,19 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 
 	return trace
 }
+
+// GetRecentSpans returns all spans from in-memory traces, optionally filtered by namespace
+func (s *Store) GetRecentSpans(namespace string) []*models.Span {
+	s.tracesMu.RLock()
+	defer s.tracesMu.RUnlock()
+
+	var spans []*models.Span
+	for _, trace := range s.recentTraces {
+		if namespace != "" && trace.Namespace != namespace {
+			continue
+		}
+		spans = append(spans, trace.Spans...)
+	}
+	return spans
+}
+

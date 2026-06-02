@@ -37,6 +37,8 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/stats", h.GetStats)
 	api.Get("/traces", h.ListTraces)
 	api.Get("/traces/:id", h.GetTrace)
+	api.Get("/traces/:id/diagnostics", h.GetTraceDiagnostics)
+	api.Get("/metrics/database", h.GetDatabaseMetrics)
 	api.Get("/services", h.GetServices)
 	api.Get("/servicemap", h.GetServiceMap)
 	api.Get("/pods", h.GetPods)
