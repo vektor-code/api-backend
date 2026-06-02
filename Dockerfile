@@ -10,8 +10,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o server ./cmd/server
+# Build statically linked binary with symbols intact for eBPF auto-instrumentation
+RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 # --- Stage 2: Final image ---
 FROM alpine:3.19
