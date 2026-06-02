@@ -1,5 +1,5 @@
 # Binaries and templates
-server
+/server
 api-backend
 *.exe
 *.exe~
