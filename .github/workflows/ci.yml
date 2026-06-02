@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/vektor-trace/api-backend
+  IMAGE_NAME: ghcr.io/vektor-code/api-backend
 
 jobs:
   build-and-push:
