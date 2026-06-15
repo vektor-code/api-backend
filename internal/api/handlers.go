@@ -116,6 +116,12 @@ func (h *Handler) ListTraces(c *fiber.Ctx) error {
 		q.HasError = &f
 	}
 
+	q.TraceID = c.Query("traceId")
+	q.Operation = c.Query("operation")
+	if minSpans := c.QueryInt("minSpans", 0); minSpans > 0 {
+		q.MinSpans = minSpans
+	}
+
 	if minMs := c.QueryFloat("minDuration", 0); minMs > 0 {
 		q.MinDurationMs = minMs
 	}

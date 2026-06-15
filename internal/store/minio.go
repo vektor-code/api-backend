@@ -174,6 +174,15 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 		if q.HasError != nil && *q.HasError != trace.HasError {
 			continue
 		}
+		if q.TraceID != "" && !strings.Contains(trace.TraceID, q.TraceID) {
+			continue
+		}
+		if q.Operation != "" && (trace.RootSpan == nil || !strings.Contains(strings.ToLower(trace.RootSpan.Name), strings.ToLower(q.Operation))) {
+			continue
+		}
+		if q.MinSpans > 0 && trace.SpanCount < q.MinSpans {
+			continue
+		}
 		if q.MinDurationMs > 0 && trace.DurationMs < q.MinDurationMs {
 			continue
 		}
@@ -187,6 +196,16 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 			continue
 		}
 
+		// Collect unique services involved in this trace
+		svcSet := make(map[string]bool)
+		for _, sp := range trace.Spans {
+			svcSet[sp.ServiceName] = true
+		}
+		var svcs []string
+		for svc := range svcSet {
+			svcs = append(svcs, svc)
+		}
+
 		item := &models.TraceListItem{
 			TraceID:     trace.TraceID,
 			ServiceName: trace.ServiceName,
@@ -195,6 +214,7 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 			DurationMs:  trace.DurationMs,
 			SpanCount:   trace.SpanCount,
 			HasError:    trace.HasError,
+			Services:    svcs,
 		}
 		if trace.RootSpan != nil {
 			item.RootName = trace.RootSpan.Name

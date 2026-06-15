@@ -71,6 +71,7 @@ type TraceListItem struct {
 	DurationMs  float64   `json:"durationMs"`
 	SpanCount   int       `json:"spanCount"`
 	HasError    bool      `json:"hasError"`
+	Services    []string  `json:"services"`
 }
 
 // ServiceStats holds aggregated metrics per service
@@ -116,16 +117,18 @@ type ServiceMapData struct {
 
 // SearchQuery represents trace search parameters
 type SearchQuery struct {
-	Namespace   string    `json:"namespace"`
-	ServiceName string    `json:"serviceName"`
-	Operation   string    `json:"operation"`
-	HasError    *bool     `json:"hasError"`
-	MinDurationMs float64 `json:"minDurationMs"`
-	MaxDurationMs float64 `json:"maxDurationMs"`
-	StartTime   time.Time `json:"startTime"`
-	EndTime     time.Time `json:"endTime"`
-	Limit       int       `json:"limit"`
-	Offset      int       `json:"offset"`
+	Namespace     string    `json:"namespace"`
+	ServiceName   string    `json:"serviceName"`
+	Operation     string    `json:"operation"`
+	TraceID       string    `json:"traceId"`
+	MinSpans      int       `json:"minSpans"`
+	HasError      *bool     `json:"hasError"`
+	MinDurationMs float64   `json:"minDurationMs"`
+	MaxDurationMs float64   `json:"maxDurationMs"`
+	StartTime     time.Time `json:"startTime"`
+	EndTime       time.Time `json:"endTime"`
+	Limit         int       `json:"limit"`
+	Offset        int       `json:"offset"`
 }
 
 // LiveSpan is sent over WebSocket for real-time streaming
