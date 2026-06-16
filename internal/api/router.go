@@ -31,8 +31,13 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	app.Post("/api/ingest", recv.IngestJSON)
 
 	// REST API
-	api := app.Group("/api")
+	api := app.Group("/api", AuthMiddleware())
 	api.Get("/health", h.Health)
+	
+	// Auth routes
+	api.Post("/auth/login", h.LoginHandler)
+	api.Get("/auth/me", h.GetMeHandler)
+
 	api.Get("/namespaces", h.GetNamespaces)
 	api.Get("/stats", h.GetStats)
 	api.Get("/traces", h.ListTraces)
@@ -43,7 +48,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/servicemap", h.GetServiceMap)
 	api.Get("/pods", h.GetPods)
 
-	// WebSocket
+	// WebSocket (WebSocket connections bypass middleware and authenticate using standard query tokens or handshake if needed, but we keep websocket endpoint unauthenticated for live-stream connections or let it pass through)
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()

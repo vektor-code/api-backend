@@ -273,6 +273,25 @@ func (h *Handler) GetDatabaseMetrics(c *fiber.Ctx) error {
 		m.CallCount++
 		if span.Status == models.SpanStatusError {
 			m.ErrorCount++
+			errMsg := span.Error
+			if errMsg == "" {
+				errMsg = span.Attributes["error.message"]
+			}
+			if errMsg == "" {
+				errMsg = "Database query execution failed"
+			}
+			if len(m.RecentErrors) < 5 {
+				found := false
+				for _, existingErr := range m.RecentErrors {
+					if existingErr == errMsg {
+						found = true
+						break
+					}
+				}
+				if !found {
+					m.RecentErrors = append(m.RecentErrors, errMsg)
+				}
+			}
 		}
 
 		if span.DurationMs > m.MaxDurationMs {

@@ -22,15 +22,16 @@ type DiagnosticReport struct {
 }
 
 type DatabaseQueryMetric struct {
-	Query         string  `json:"query"`
-	System        string  `json:"system"`
-	Service       string  `json:"service"`
-	Namespace     string  `json:"namespace"`
-	CallCount     int64   `json:"callCount"`
-	ErrorCount    int64   `json:"errorCount"`
-	ErrorRate     float64 `json:"errorRate"`
-	AvgDurationMs float64 `json:"avgDurationMs"`
-	MaxDurationMs float64 `json:"maxDurationMs"`
+	Query         string   `json:"query"`
+	System        string   `json:"system"`
+	Service       string   `json:"service"`
+	Namespace     string   `json:"namespace"`
+	CallCount     int64    `json:"callCount"`
+	ErrorCount    int64    `json:"errorCount"`
+	ErrorRate     float64  `json:"errorRate"`
+	AvgDurationMs float64  `json:"avgDurationMs"`
+	MaxDurationMs float64  `json:"maxDurationMs"`
+	RecentErrors  []string `json:"recentErrors"`
 }
 
 // AnalyzeTrace parses the span structure to isolate the root error and CPU/wait bottleneck
