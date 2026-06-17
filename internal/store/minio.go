@@ -302,14 +302,15 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 			dbSystem, hasDb := sp.Attributes["db.system"]
 			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
 			if hasDb || hasMsg {
-				infraName := ""
+				baseName := ""
 				if hasDb {
-					infraName = strings.ToLower(dbSystem)
+					baseName = dbSystem
 				} else {
-					infraName = strings.ToLower(messagingSystem)
+					baseName = messagingSystem
 				}
 
-				if infraName != "" {
+				if baseName != "" {
+					infraName := getInfraNodeName(sp, baseName)
 					edgeKey := sp.ServiceName + "->" + infraName
 					e, ok := edgeMap[edgeKey]
 					if !ok {
@@ -781,5 +782,52 @@ func (s *Store) GetRecentSpans(namespace string) []*models.Span {
 		spans = append(spans, trace.Spans...)
 	}
 	return spans
+}
+
+// getInfraNodeName constructs a specific and unique identifier for database/queue target nodes
+func getInfraNodeName(span *models.Span, baseName string) string {
+	dbName := span.Attributes["db.name"]
+	msgDest := span.Attributes["messaging.destination"]
+	if msgDest == "" {
+		msgDest = span.Attributes["messaging.destination.name"]
+	}
+	if msgDest == "" {
+		msgDest = span.Attributes["messaging.destination_name"]
+	}
+	if msgDest == "" {
+		msgDest = span.Attributes["messaging.dest"]
+	}
+
+	peerName := span.Attributes["net.peer.name"]
+	if peerName == "" {
+		peerName = span.Attributes["server.address"]
+	}
+	if peerName == "" {
+		peerName = span.Attributes["peer.service"]
+	}
+	if peerName == "" {
+		peerName = span.Attributes["net.peer.ip"]
+	}
+	if peerName == "" {
+		peerName = span.Attributes["network.peer.address"]
+	}
+
+	resourceName := dbName
+	if resourceName == "" {
+		resourceName = msgDest
+	}
+
+	resource := ""
+	if peerName != "" && resourceName != "" {
+		resource = peerName + "/" + resourceName
+	} else if resourceName != "" {
+		resource = resourceName
+	} else if peerName != "" {
+		resource = peerName
+	} else {
+		resource = span.ServiceName
+	}
+
+	return strings.ToLower(baseName) + " (" + resource + ")"
 }
 
