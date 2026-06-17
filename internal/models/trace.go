@@ -76,15 +76,16 @@ type TraceListItem struct {
 
 // ServiceStats holds aggregated metrics per service
 type ServiceStats struct {
-	ServiceName  string    `json:"serviceName"`
-	Namespace    string    `json:"namespace"`
-	RequestCount int64     `json:"requestCount"`
-	ErrorCount   int64     `json:"errorCount"`
-	ErrorRate    float64   `json:"errorRate"`
-	P50Ms        float64   `json:"p50Ms"`
-	P95Ms        float64   `json:"p95Ms"`
-	P99Ms        float64   `json:"p99Ms"`
-	LastSeen     time.Time `json:"lastSeen"`
+	ServiceName      string    `json:"serviceName"`
+	Namespace        string    `json:"namespace"`
+	RequestCount     int64     `json:"requestCount"`
+	ErrorCount       int64     `json:"errorCount"`
+	ErrorRate        float64   `json:"errorRate"`
+	P50Ms            float64   `json:"p50Ms"`
+	P95Ms            float64   `json:"p95Ms"`
+	P99Ms            float64   `json:"p99Ms"`
+	LastSeen         time.Time `json:"lastSeen"`
+	IsInfrastructure bool      `json:"isInfrastructure"`
 }
 
 // NamespaceStats holds aggregated metrics per namespace

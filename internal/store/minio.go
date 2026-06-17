@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,11 @@ type Store struct {
 
 	recentTraces map[string]*models.Trace
 	tracesMu     sync.RWMutex
+
+	// Local caches (collected by this pod instance only)
+	localStats   map[string]*models.ServiceStats
+	localTraces  map[string]*models.Trace
+	localMu      sync.RWMutex
 }
 
 
@@ -58,9 +64,12 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		bucketName:   bucket,
 		statsCache:   make(map[string]*models.ServiceStats),
 		recentTraces: make(map[string]*models.Trace),
+		localStats:   make(map[string]*models.ServiceStats),
+		localTraces:  make(map[string]*models.Trace),
 	}
 
 	go s.runGC()
+	go s.runSync()
 	return s, nil
 }
 
@@ -88,8 +97,8 @@ func (s *Store) SaveSpan(span *models.Span) error {
 		})
 	}()
 
-	s.updateStats(span)
-	s.updateRecentTraces(span)
+	s.updateLocalStats(span)
+	s.updateLocalRecentTraces(span)
 	return nil
 }
 
@@ -276,6 +285,7 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 
 	data := &models.ServiceMapData{Namespace: namespace}
 	edgeMap := make(map[string]*models.ServiceEdge)
+	infraNodes := make(map[string]*models.ServiceStats)
 
 	// Scan recent traces for edges
 	for _, trace := range s.recentTraces {
@@ -288,6 +298,52 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 			spanMap[sp.SpanID] = sp
 		}
 		for _, sp := range trace.Spans {
+			// Check for external database or messaging infrastructure calls on each span
+			dbSystem, hasDb := sp.Attributes["db.system"]
+			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
+			if hasDb || hasMsg {
+				infraName := ""
+				if hasDb {
+					infraName = strings.ToLower(dbSystem)
+				} else {
+					infraName = strings.ToLower(messagingSystem)
+				}
+
+				if infraName != "" {
+					edgeKey := sp.ServiceName + "->" + infraName
+					e, ok := edgeMap[edgeKey]
+					if !ok {
+						e = &models.ServiceEdge{
+							Source: sp.ServiceName,
+							Target: infraName,
+						}
+						edgeMap[edgeKey] = e
+					}
+					e.CallCount++
+					e.AvgDurationMs = (e.AvgDurationMs*float64(e.CallCount-1) + sp.DurationMs) / float64(e.CallCount)
+					if sp.Status == models.SpanStatusError {
+						e.ErrorCount++
+					}
+
+					// Track metrics for the virtual infrastructure node
+					infraKey := sp.Namespace + ":" + infraName
+					infra, ok := infraNodes[infraKey]
+					if !ok {
+						infra = &models.ServiceStats{
+							ServiceName:      infraName,
+							Namespace:        sp.Namespace,
+							IsInfrastructure: true,
+						}
+						infraNodes[infraKey] = infra
+					}
+					infra.RequestCount++
+					if sp.Status == models.SpanStatusError {
+						infra.ErrorCount++
+					}
+					infra.P50Ms = (infra.P50Ms*float64(infra.RequestCount-1) + sp.DurationMs) / float64(infra.RequestCount)
+				}
+			}
+
 			if sp.ParentSpanID == "" || sp.ParentSpanID == "0" || sp.ParentSpanID == "0000000000000000" {
 				// Trace entry point from external traffic
 				edgeKey := "Internet->" + sp.ServiceName
@@ -352,6 +408,16 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		}
 		if namespace == "" || parts[0] == namespace {
 			data.Nodes = append(data.Nodes, models.ServiceStats(*svc))
+		}
+	}
+
+	// Append infrastructure nodes
+	for _, infra := range infraNodes {
+		if namespace == "" || infra.Namespace == namespace {
+			if infra.RequestCount > 0 {
+				infra.ErrorRate = float64(infra.ErrorCount) / float64(infra.RequestCount) * 100
+			}
+			data.Nodes = append(data.Nodes, *infra)
 		}
 	}
 
@@ -446,19 +512,215 @@ func (s *Store) updateRecentTraces(span *models.Span) {
 	}
 }
 
-// runGC cleans up old in-memory traces to prevent OOM
+// runGC cleans up old in-memory local traces to prevent OOM
 func (s *Store) runGC() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.tracesMu.Lock()
+		s.localMu.Lock()
 		cutoff := time.Now().Add(-1 * time.Hour)
-		for id, trace := range s.recentTraces {
+		for id, trace := range s.localTraces {
 			if trace.StartTime.Before(cutoff) {
-				delete(s.recentTraces, id)
+				delete(s.localTraces, id)
 			}
 		}
-		s.tracesMu.Unlock()
+		s.localMu.Unlock()
+	}
+}
+
+// PodState represents the cache snapshot of a single replica pod
+type PodState struct {
+	Stats        map[string]*models.ServiceStats `json:"stats"`
+	RecentTraces map[string]*models.Trace        `json:"recentTraces"`
+	UpdatedAt    time.Time                       `json:"updatedAt"`
+}
+
+// runSync runs the background replication loop
+func (s *Store) runSync() {
+	// Sync immediately on startup
+	s.syncState()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.syncState()
+	}
+}
+
+// syncState handles serialization of local state and merging from other active replicas
+func (s *Store) syncState() {
+	hn, err := os.Hostname()
+	if err != nil {
+		hn = "unknown"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Write this pod's local state to MinIO
+	s.localMu.RLock()
+	state := PodState{
+		Stats:        make(map[string]*models.ServiceStats),
+		RecentTraces: make(map[string]*models.Trace),
+		UpdatedAt:    time.Now(),
+	}
+	for k, v := range s.localStats {
+		state.Stats[k] = v
+	}
+	for k, v := range s.localTraces {
+		state.RecentTraces[k] = v
+	}
+	s.localMu.RUnlock()
+
+	data, err := json.Marshal(state)
+	if err == nil {
+		objectName := fmt.Sprintf("state/pod-%s.json", hn)
+		_, _ = s.client.PutObject(ctx, s.bucketName, objectName, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+			ContentType: "application/json",
+		})
+	}
+
+	// 2. Scan and merge states from all active replicas
+	newStatsCache := make(map[string]*models.ServiceStats)
+	newRecentTraces := make(map[string]*models.Trace)
+
+	for obj := range s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+		Prefix:    "state/",
+		Recursive: false,
+	}) {
+		if obj.Err != nil {
+			continue
+		}
+
+		// Delete state files that haven't been updated for over an hour (dead pods)
+		if obj.LastModified.Before(time.Now().Add(-1 * time.Hour)) {
+			_ = s.client.RemoveObject(ctx, s.bucketName, obj.Key, minio.RemoveObjectOptions{})
+			continue
+		}
+
+		// Download and parse replica state
+		objReader, err := s.client.GetObject(ctx, s.bucketName, obj.Key, minio.GetObjectOptions{})
+		if err != nil {
+			continue
+		}
+		
+		var pState PodState
+		dec := json.NewDecoder(objReader)
+		err = dec.Decode(&pState)
+		objReader.Close()
+		if err != nil {
+			continue
+		}
+
+		// Merge stats
+		for k, svc := range pState.Stats {
+			existing, ok := newStatsCache[k]
+			if !ok {
+				existing = &models.ServiceStats{
+					ServiceName:      svc.ServiceName,
+					Namespace:        svc.Namespace,
+					IsInfrastructure: svc.IsInfrastructure,
+				}
+				newStatsCache[k] = existing
+			}
+			totalReq := existing.RequestCount + svc.RequestCount
+			if totalReq > 0 {
+				existing.P50Ms = (existing.P50Ms*float64(existing.RequestCount) + svc.P50Ms*float64(svc.RequestCount)) / float64(totalReq)
+				existing.P95Ms = (existing.P95Ms*float64(existing.RequestCount) + svc.P95Ms*float64(svc.RequestCount)) / float64(totalReq)
+				existing.P99Ms = (existing.P99Ms*float64(existing.RequestCount) + svc.P99Ms*float64(svc.RequestCount)) / float64(totalReq)
+			}
+			existing.RequestCount = totalReq
+			existing.ErrorCount += svc.ErrorCount
+			if svc.LastSeen.After(existing.LastSeen) {
+				existing.LastSeen = svc.LastSeen
+			}
+			if totalReq > 0 {
+				existing.ErrorRate = float64(existing.ErrorCount) / float64(totalReq) * 100
+			}
+		}
+
+		// Merge traces
+		for k, t := range pState.RecentTraces {
+			existing, ok := newRecentTraces[k]
+			if !ok {
+				newRecentTraces[k] = t
+				continue
+			}
+			spanMap := make(map[string]*models.Span)
+			for _, sp := range existing.Spans {
+				spanMap[sp.SpanID] = sp
+			}
+			for _, sp := range t.Spans {
+				spanMap[sp.SpanID] = sp
+			}
+			var combinedSpans []*models.Span
+			for _, sp := range spanMap {
+				combinedSpans = append(combinedSpans, sp)
+			}
+			newRecentTraces[k] = buildTrace(t.TraceID, combinedSpans)
+		}
+	}
+
+	// Hot-swap global caches
+	s.statsMu.Lock()
+	s.statsCache = newStatsCache
+	s.statsMu.Unlock()
+
+	s.tracesMu.Lock()
+	s.recentTraces = newRecentTraces
+	s.tracesMu.Unlock()
+}
+
+func (s *Store) updateLocalStats(span *models.Span) {
+	key := span.Namespace + ":" + span.ServiceName
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+
+	stat, ok := s.localStats[key]
+	if !ok {
+		stat = &models.ServiceStats{
+			ServiceName: span.ServiceName,
+			Namespace:   span.Namespace,
+		}
+		s.localStats[key] = stat
+	}
+
+	stat.RequestCount++
+	if span.Status == models.SpanStatusError {
+		stat.ErrorCount++
+	}
+	if stat.RequestCount > 0 {
+		stat.ErrorRate = float64(stat.ErrorCount) / float64(stat.RequestCount) * 100
+	}
+	stat.LastSeen = time.Now()
+
+	n := float64(stat.RequestCount)
+	stat.P50Ms = (stat.P50Ms*(n-1) + span.DurationMs) / n
+}
+
+func (s *Store) updateLocalRecentTraces(span *models.Span) {
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+
+	trace, ok := s.localTraces[span.TraceID]
+	if !ok {
+		trace = &models.Trace{
+			TraceID: span.TraceID,
+		}
+		s.localTraces[span.TraceID] = trace
+	}
+	
+	exists := false
+	for _, sp := range trace.Spans {
+		if sp.SpanID == span.SpanID {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		trace.Spans = append(trace.Spans, span)
+		updatedTrace := buildTrace(trace.TraceID, trace.Spans)
+		s.localTraces[span.TraceID] = updatedTrace
 	}
 }
 
