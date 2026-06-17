@@ -294,23 +294,38 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		}
 		
 		spanMap := make(map[string]*models.Span)
+		parentSet := make(map[string]bool)
 		for _, sp := range trace.Spans {
 			spanMap[sp.SpanID] = sp
+			if sp.ParentSpanID != "" {
+				parentSet[sp.ParentSpanID] = true
+			}
 		}
+
 		for _, sp := range trace.Spans {
-			// Check for external database or messaging infrastructure calls on each span
+			// Check for external database or messaging infrastructure calls, or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
 			dbSystem, hasDb := sp.Attributes["db.system"]
 			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
-			if hasDb || hasMsg {
+			isClient := sp.Kind == models.SpanKindClient || sp.Kind == "CLIENT"
+
+			if hasDb || hasMsg || (isClient && !parentSet[sp.SpanID]) {
 				baseName := ""
 				if hasDb {
 					baseName = dbSystem
-				} else {
+				} else if hasMsg {
 					baseName = messagingSystem
+				} else {
+					baseName = getClientDependencyName(sp)
 				}
 
 				if baseName != "" {
 					infraName := getInfraNodeName(sp, baseName)
+					
+					// Avoid self-loop rendering if client name matches service name
+					if infraName == sp.ServiceName {
+						continue
+					}
+
 					edgeKey := sp.ServiceName + "->" + infraName
 					e, ok := edgeMap[edgeKey]
 					if !ok {
@@ -829,5 +844,50 @@ func getInfraNodeName(span *models.Span, baseName string) string {
 	}
 
 	return strings.ToLower(baseName) + " (" + resource + ")"
+}
+
+// getClientDependencyName parses target hostname/identity from HTTP/gRPC client spans
+func getClientDependencyName(span *models.Span) string {
+	if peer := span.Attributes["peer.service"]; peer != "" {
+		return peer
+	}
+	
+	if strings.Contains(strings.ToLower(span.Name), "vault") {
+		return "vault"
+	}
+	if urlStr := span.Attributes["http.url"]; urlStr != "" && strings.Contains(strings.ToLower(urlStr), "vault") {
+		return "vault"
+	}
+
+	host := span.Attributes["server.address"]
+	if host == "" {
+		host = span.Attributes["net.peer.name"]
+	}
+	if host == "" {
+		host = span.Attributes["http.host"]
+	}
+	
+	if host != "" {
+		if idx := strings.Index(host, ":"); idx != -1 {
+			return host[:idx]
+		}
+		return host
+	}
+
+	if urlStr := span.Attributes["http.url"]; urlStr != "" {
+		if idx := strings.Index(urlStr, "://"); idx != -1 {
+			rem := urlStr[idx+3:]
+			if endIdx := strings.IndexAny(rem, ":/"); endIdx != -1 {
+				return rem[:endIdx]
+			}
+			return rem
+		}
+	}
+
+	if span.Name != "" {
+		return span.Name
+	}
+
+	return "external"
 }
 
