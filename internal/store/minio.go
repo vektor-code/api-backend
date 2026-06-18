@@ -855,6 +855,59 @@ type PodState struct {
 	UpdatedAt    time.Time                       `json:"updatedAt"`
 }
 
+// TracePodInfo represents pod metadata extracted from ingested trace spans.
+// This enables pod visibility for remote clusters without direct K8s API access.
+type TracePodInfo struct {
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	NodeName    string            `json:"nodeName"`
+	ServiceName string            `json:"serviceName"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	LastSeen    time.Time         `json:"lastSeen"`
+}
+
+// GetTracePodsByNamespace scans recent traces and extracts unique pod metadata
+// from span resource attributes (k8s.pod.name, k8s.node.name).
+// This provides pod discovery for namespaces on remote clusters that send
+// OTEL traces but are not reachable via the local K8s API watcher.
+func (s *Store) GetTracePodsByNamespace(namespace string) []TracePodInfo {
+	s.tracesMu.RLock()
+	defer s.tracesMu.RUnlock()
+
+	podMap := make(map[string]*TracePodInfo)
+	for _, trace := range s.recentTraces {
+		for _, sp := range trace.Spans {
+			if sp.PodName == "" {
+				continue
+			}
+			if namespace != "" && sp.Namespace != namespace {
+				continue
+			}
+			key := sp.Namespace + "/" + sp.PodName
+			if existing, ok := podMap[key]; !ok || sp.StartTime.After(existing.LastSeen) {
+				podMap[key] = &TracePodInfo{
+					Name:        sp.PodName,
+					Namespace:   sp.Namespace,
+					NodeName:    sp.NodeName,
+					ServiceName: sp.ServiceName,
+					Labels: map[string]string{
+						"app":     sp.ServiceName,
+						"version": "v1.0",
+					},
+					LastSeen: sp.StartTime,
+				}
+			}
+		}
+	}
+
+	result := make([]TracePodInfo, 0, len(podMap))
+	for _, p := range podMap {
+		result = append(result, *p)
+	}
+	return result
+}
+
+
 // runSync runs the background replication loop
 func (s *Store) runSync() {
 	// Sync immediately on startup

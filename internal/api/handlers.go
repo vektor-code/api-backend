@@ -246,47 +246,8 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 
 	var enrichedPods []PodMetricInfo
 
-	// If no pods returned from K8s (or watcher is nil), generate mock pods from active store services
-	if len(pods) == 0 {
-		stats, err := h.store.GetNamespaceStats()
-		if err == nil {
-			for _, nsStat := range stats {
-				if ns == "" || nsStat.Namespace == ns {
-					for _, svc := range nsStat.Services {
-						if svc.ServiceName == "Internet" || svc.IsInfrastructure {
-							continue
-						}
-						// Create 1-2 pods for this service
-						podName1 := fmt.Sprintf("%s-%s-5g7h8", svc.ServiceName, randString(5))
-						enrichedPods = append(enrichedPods, PodMetricInfo{
-							Name:         podName1,
-							Namespace:    nsStat.Namespace,
-							NodeName:     "k8s-node-worker-1",
-							Labels:       map[string]string{"app": svc.ServiceName, "version": "v1.0"},
-							Phase:        "Running",
-							CpuLimit:     1000.0,
-							MemoryLimit:  1024.0,
-							RestartCount: 0,
-						})
-
-						if strings.Contains(svc.ServiceName, "clickhouse") || strings.Contains(svc.ServiceName, "kafka") || strings.Contains(svc.ServiceName, "backend") {
-							podName2 := fmt.Sprintf("%s-%s-9x2y4", svc.ServiceName, randString(5))
-							enrichedPods = append(enrichedPods, PodMetricInfo{
-								Name:         podName2,
-								Namespace:    nsStat.Namespace,
-								NodeName:     "k8s-node-worker-2",
-								Labels:       map[string]string{"app": svc.ServiceName, "version": "v1.0"},
-								Phase:        "Running",
-								CpuLimit:     1000.0,
-								MemoryLimit:  1024.0,
-								RestartCount: 0,
-							})
-						}
-					}
-				}
-			}
-		}
-	} else {
+	if len(pods) > 0 {
+		// Use real pods from K8s API watcher (local cluster)
 		for _, p := range pods {
 			enrichedPods = append(enrichedPods, PodMetricInfo{
 				Name:         p.Name,
@@ -298,6 +259,68 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 				MemoryLimit:  1024.0,
 				RestartCount: 0,
 			})
+		}
+	} else {
+		// K8s watcher has no pods for this namespace.
+		// This happens for remote clusters (e.g. dev cluster) that send
+		// OTEL traces but aren't reachable via the local K8s API.
+		// Extract real pod metadata from ingested trace spans.
+		tracePods := h.store.GetTracePodsByNamespace(ns)
+		if len(tracePods) > 0 {
+			for _, tp := range tracePods {
+				enrichedPods = append(enrichedPods, PodMetricInfo{
+					Name:         tp.Name,
+					Namespace:    tp.Namespace,
+					NodeName:     tp.NodeName,
+					Labels:       tp.Labels,
+					Phase:        "Running",
+					CpuLimit:     1000.0,
+					MemoryLimit:  1024.0,
+					RestartCount: 0,
+				})
+			}
+		}
+
+		// Last resort: generate synthetic pods from namespace service stats
+		if len(enrichedPods) == 0 {
+			stats, err := h.store.GetNamespaceStats()
+			if err == nil {
+				for _, nsStat := range stats {
+					if ns == "" || nsStat.Namespace == ns {
+						for _, svc := range nsStat.Services {
+							if svc.ServiceName == "Internet" || svc.IsInfrastructure {
+								continue
+							}
+							// Create 1-2 pods for this service
+							podName1 := fmt.Sprintf("%s-%s-5g7h8", svc.ServiceName, randString(5))
+							enrichedPods = append(enrichedPods, PodMetricInfo{
+								Name:         podName1,
+								Namespace:    nsStat.Namespace,
+								NodeName:     "k8s-node-worker-1",
+								Labels:       map[string]string{"app": svc.ServiceName, "version": "v1.0"},
+								Phase:        "Running",
+								CpuLimit:     1000.0,
+								MemoryLimit:  1024.0,
+								RestartCount: 0,
+							})
+
+							if strings.Contains(svc.ServiceName, "clickhouse") || strings.Contains(svc.ServiceName, "kafka") || strings.Contains(svc.ServiceName, "backend") {
+								podName2 := fmt.Sprintf("%s-%s-9x2y4", svc.ServiceName, randString(5))
+								enrichedPods = append(enrichedPods, PodMetricInfo{
+									Name:         podName2,
+									Namespace:    nsStat.Namespace,
+									NodeName:     "k8s-node-worker-2",
+									Labels:       map[string]string{"app": svc.ServiceName, "version": "v1.0"},
+									Phase:        "Running",
+									CpuLimit:     1000.0,
+									MemoryLimit:  1024.0,
+									RestartCount: 0,
+								})
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
