@@ -224,15 +224,62 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 			svcs = append(svcs, svc)
 		}
 
+		var errType string
+		var errSummary string
+		if trace.HasError {
+			// Find the first error span details
+			for _, sp := range trace.Spans {
+				if sp.Status == models.SpanStatusError {
+					dbSys := sp.Attributes["db.system"]
+					msgSys := sp.Attributes["messaging.system"]
+					
+					if dbSys != "" {
+						errType = dbSys
+					} else if msgSys != "" {
+						errType = msgSys
+					} else if sp.Attributes["http.url"] != "" || sp.Attributes["http.method"] != "" {
+						errType = "http"
+					} else {
+						errType = "app"
+					}
+					
+					msg := sp.Attributes["error.message"]
+					if msg == "" {
+						msg = sp.Attributes["exception.message"]
+					}
+					if msg == "" {
+						msg = sp.Attributes["status.message"]
+					}
+					if msg == "" && len(sp.Events) > 0 {
+						for _, ev := range sp.Events {
+							if ev.Attributes != nil {
+								if evMsg := ev.Attributes["exception.message"]; evMsg != "" {
+									msg = evMsg
+									break
+								}
+							}
+						}
+					}
+					if msg == "" {
+						msg = "Unknown error"
+					}
+					errSummary = msg
+					break
+				}
+			}
+		}
+
 		item := &models.TraceListItem{
-			TraceID:     trace.TraceID,
-			ServiceName: trace.ServiceName,
-			Namespace:   trace.Namespace,
-			StartTime:   trace.StartTime,
-			DurationMs:  trace.DurationMs,
-			SpanCount:   trace.SpanCount,
-			HasError:    trace.HasError,
-			Services:    svcs,
+			TraceID:      trace.TraceID,
+			ServiceName:  trace.ServiceName,
+			Namespace:    trace.Namespace,
+			StartTime:    trace.StartTime,
+			DurationMs:   trace.DurationMs,
+			SpanCount:    trace.SpanCount,
+			HasError:     trace.HasError,
+			Services:     svcs,
+			ErrorType:    errType,
+			ErrorSummary: errSummary,
 		}
 		if trace.RootSpan != nil {
 			item.RootName = trace.RootSpan.Name

@@ -63,15 +63,17 @@ type Trace struct {
 
 // TraceListItem is a lightweight summary for list views
 type TraceListItem struct {
-	TraceID     string    `json:"traceId"`
-	ServiceName string    `json:"serviceName"`
-	Namespace   string    `json:"namespace"`
-	RootName    string    `json:"rootName"`
-	StartTime   time.Time `json:"startTime"`
-	DurationMs  float64   `json:"durationMs"`
-	SpanCount   int       `json:"spanCount"`
-	HasError    bool      `json:"hasError"`
-	Services    []string  `json:"services"`
+	TraceID      string    `json:"traceId"`
+	ServiceName  string    `json:"serviceName"`
+	Namespace    string    `json:"namespace"`
+	RootName     string    `json:"rootName"`
+	StartTime    time.Time `json:"startTime"`
+	DurationMs   float64   `json:"durationMs"`
+	SpanCount    int       `json:"spanCount"`
+	HasError     bool      `json:"hasError"`
+	Services     []string  `json:"services"`
+	ErrorType    string    `json:"errorType,omitempty"`
+	ErrorSummary string    `json:"errorSummary,omitempty"`
 }
 
 // ServiceStats holds aggregated metrics per service
