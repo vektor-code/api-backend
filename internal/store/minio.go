@@ -174,8 +174,17 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 
 	var items []*models.TraceListItem
 	for _, trace := range s.recentTraces {
-		if q.Namespace != "" && trace.Namespace != q.Namespace {
-			continue
+		if q.Namespace != "" {
+			hasNs := false
+			for _, sp := range trace.Spans {
+				if sp.Namespace == q.Namespace {
+					hasNs = true
+					break
+				}
+			}
+			if !hasNs {
+				continue
+			}
 		}
 		if q.ServiceName != "" && trace.ServiceName != q.ServiceName {
 			continue
@@ -289,8 +298,17 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 
 	// Scan recent traces for edges
 	for _, trace := range s.recentTraces {
-		if namespace != "" && trace.Namespace != namespace {
-			continue
+		if namespace != "" {
+			hasNs := false
+			for _, sp := range trace.Spans {
+				if sp.Namespace == namespace {
+					hasNs = true
+					break
+				}
+			}
+			if !hasNs {
+				continue
+			}
 		}
 		
 		spanMap := make(map[string]*models.Span)
