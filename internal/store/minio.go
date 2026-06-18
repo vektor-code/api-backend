@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"sort"
@@ -71,6 +72,7 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 
 	go s.runGC()
 	go s.runSync()
+	go s.runMinioGC()
 	return s, nil
 }
 
@@ -1473,4 +1475,56 @@ func (s *Store) parseK8sServiceAndNamespace(host string) (string, string) {
 
 	return parts[0], ""
 }
+
+// runMinioGC periodically deletes traces from MinIO that are older than 12 hours
+func (s *Store) runMinioGC() {
+	// Wait a bit after startup
+	time.Sleep(15 * time.Second)
+	s.cleanOldMinioTraces()
+
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.cleanOldMinioTraces()
+	}
+}
+
+func (s *Store) cleanOldMinioTraces() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	cutoff := time.Now().Add(-12 * time.Hour)
+	log.Printf("[GC] Starting MinIO log retention cleanup (traces older than 12h: %v)...", cutoff)
+
+	objectsCh := make(chan minio.ObjectInfo, 100)
+	var count int64
+
+	// Send objects to delete to objectsCh
+	go func() {
+		defer close(objectsCh)
+		for obj := range s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+			Prefix:    "traces/",
+			Recursive: true,
+		}) {
+			if obj.Err != nil {
+				continue
+			}
+			if obj.LastModified.Before(cutoff) {
+				objectsCh <- obj
+				count++
+			}
+		}
+	}()
+
+	// RemoveObjects returns a channel of errors. We must consume it to execute the deletion.
+	errorCh := s.client.RemoveObjects(ctx, s.bucketName, objectsCh, minio.RemoveObjectsOptions{})
+	for err := range errorCh {
+		if err.Err != nil {
+			log.Printf("[GC] Error removing object %s: %v", err.ObjectName, err.Err)
+		}
+	}
+
+	log.Printf("[GC] MinIO log retention cleanup finished. Removed %d objects.", count)
+}
+
 
