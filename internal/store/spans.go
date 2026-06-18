@@ -1,0 +1,508 @@
+package store
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/minio/minio-go/v7"
+)
+
+// SaveSpan writes a span to MinIO
+func (s *Store) SaveSpan(span *models.Span) error {
+	s.enrichSpanMetadata(span)
+
+	data, err := json.Marshal(span)
+	if err != nil {
+		return err
+	}
+
+	// S3 path: traces/namespace/service/traceID/spanID.json
+	objectName := fmt.Sprintf("traces/%s/%s/%s/%s.json", span.Namespace, span.ServiceName, span.TraceID, span.SpanID)
+	
+	// Fire and forget upload to avoid blocking the ingestion path
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = s.client.PutObject(ctx, s.bucketName, objectName, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+			ContentType: "application/json",
+		})
+	}()
+
+	s.updateLocalStats(span)
+	s.updateLocalRecentTraces(span)
+	return nil
+}
+
+// enrichSpanMetadata fills in missing metadata like db.system for uninstrumented databases
+func (s *Store) enrichSpanMetadata(span *models.Span) {
+	if span == nil {
+		return
+	}
+	if span.Attributes == nil {
+		span.Attributes = make(map[string]string)
+	}
+
+	// Only process CLIENT spans
+	isClient := span.Kind == models.SpanKindClient || span.Kind == "CLIENT"
+	if !isClient {
+		return
+	}
+
+	// 1. Identify target addresses, service name, and ports
+	peerName := strings.ToLower(span.Attributes["net.peer.name"])
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["server.address"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["peer.service"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["net.peer.ip"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["network.peer.address"])
+	}
+
+	portStr := span.Attributes["server.port"]
+	if portStr == "" {
+		portStr = span.Attributes["net.peer.port"]
+	}
+	if portStr == "" {
+		portStr = span.Attributes["peer.port"]
+	}
+
+	inferredSystem := ""
+	isDb := false
+	isMsg := false
+
+	// 2. Scan all span attributes to find explicit or implicit hints
+	for k, v := range span.Attributes {
+		valLower := strings.ToLower(v)
+		keyLower := strings.ToLower(k)
+
+		if keyLower == "db.system" && valLower != "" && valLower != "unknown" {
+			inferredSystem = valLower
+			isDb = true
+			break
+		}
+		if keyLower == "messaging.system" && valLower != "" && valLower != "unknown" {
+			inferredSystem = valLower
+			isMsg = true
+			break
+		}
+
+		// Check for connection string or identifier patterns
+		if strings.Contains(valLower, "redis://") || strings.Contains(valLower, "redis-") || valLower == "redis" {
+			inferredSystem = "redis"
+			isDb = true
+		}
+		if strings.Contains(valLower, "kafka") || strings.Contains(valLower, "broker-") {
+			inferredSystem = "kafka"
+			isMsg = true
+		}
+		if strings.Contains(valLower, "rabbitmq") || strings.Contains(valLower, "amqp://") || strings.Contains(valLower, "amqps://") {
+			inferredSystem = "rabbitmq"
+			isMsg = true
+		}
+		if strings.Contains(valLower, "minio") || strings.Contains(valLower, "s3.amazonaws") {
+			inferredSystem = "minio"
+			isDb = true
+		}
+		if strings.Contains(valLower, "vault") {
+			inferredSystem = "vault"
+			isDb = true
+		}
+		if strings.Contains(valLower, "clickhouse") {
+			inferredSystem = "clickhouse"
+			isDb = true
+		}
+		if strings.Contains(valLower, "liquibase") {
+			inferredSystem = "liquibase"
+			isDb = true
+		}
+		if strings.Contains(valLower, "nginx") {
+			inferredSystem = "nginx"
+			isDb = true
+		}
+		if strings.Contains(valLower, "kong") {
+			inferredSystem = "kong"
+			isDb = true
+		}
+	}
+
+	// 3. Port-based inference (including SSL / custom ports)
+	if inferredSystem == "" && portStr != "" {
+		switch portStr {
+		case "5432", "5433":
+			inferredSystem = "postgresql"
+			isDb = true
+		case "3306", "33060":
+			inferredSystem = "mysql"
+			isDb = true
+		case "6379", "6380":
+			inferredSystem = "redis"
+			isDb = true
+		case "27017", "27018":
+			inferredSystem = "mongodb"
+			isDb = true
+		case "9092", "9093", "9094", "29092", "39092":
+			inferredSystem = "kafka"
+			isMsg = true
+		case "5671", "5672", "15672", "15671":
+			inferredSystem = "rabbitmq"
+			isMsg = true
+		case "1433":
+			inferredSystem = "mssql"
+			isDb = true
+		case "1521":
+			inferredSystem = "oracle"
+			isDb = true
+		case "9200", "9300":
+			inferredSystem = "elasticsearch"
+			isDb = true
+		case "8200", "8201":
+			inferredSystem = "vault"
+			isDb = true
+		case "9000", "9001":
+			inferredSystem = "minio"
+			isDb = true
+		case "8123", "9440":
+			inferredSystem = "clickhouse"
+			isDb = true
+		case "8000", "8443", "8001", "8444":
+			inferredSystem = "kong"
+			isDb = true
+		}
+	}
+
+	// Helper to match database substrings
+	checkSubstrings := func(str string) (string, bool, bool) {
+		if str == "" {
+			return "", false, false
+		}
+		if strings.Contains(str, "postgres") || (strings.Contains(str, "pg") && !strings.Contains(str, "png") && !strings.Contains(str, "page")) {
+			return "postgresql", true, false
+		}
+		if strings.Contains(str, "redis") {
+			return "redis", true, false
+		}
+		if strings.Contains(str, "mysql") {
+			return "mysql", true, false
+		}
+		if strings.Contains(str, "mongo") {
+			return "mongodb", true, false
+		}
+		if strings.Contains(str, "oracle") {
+			return "oracle", true, false
+		}
+		if strings.Contains(str, "mssql") || strings.Contains(str, "sqlserver") {
+			return "mssql", true, false
+		}
+		if strings.Contains(str, "kafka") {
+			return "kafka", false, true
+		}
+		if strings.Contains(str, "rabbitmq") || strings.Contains(str, "amqp") {
+			return "rabbitmq", false, true
+		}
+		if strings.Contains(str, "elasticsearch") || strings.Contains(str, "elastic") {
+			return "elasticsearch", true, false
+		}
+		if strings.Contains(str, "minio") || strings.Contains(str, "s3") {
+			return "minio", true, false
+		}
+		if strings.Contains(str, "vault") {
+			return "vault", true, false
+		}
+		if strings.Contains(str, "clickhouse") {
+			return "clickhouse", true, false
+		}
+		if strings.Contains(str, "liquibase") {
+			return "liquibase", true, false
+		}
+		if strings.Contains(str, "nginx") {
+			return "nginx", true, false
+		}
+		if strings.Contains(str, "kong") {
+			return "kong", true, false
+		}
+		if strings.Contains(str, "db") || strings.Contains(str, "database") || strings.Contains(str, "sql") {
+			return "database", true, false
+		}
+		return "", false, false
+	}
+
+	// 4. Substring-based inference from peer name / service / span name
+	if inferredSystem == "" {
+		if sys, db, msg := checkSubstrings(strings.ToLower(span.Name)); sys != "" {
+			inferredSystem = sys
+			isDb = db
+			isMsg = msg
+		}
+	}
+	if inferredSystem == "" && peerName != "" {
+		if sys, db, msg := checkSubstrings(peerName); sys != "" {
+			inferredSystem = sys
+			isDb = db
+			isMsg = msg
+		}
+	}
+
+	// 5. Redis Command Name checks (when span name is exactly a command like GET/SET)
+	if inferredSystem == "" {
+		spanNameLower := strings.ToLower(span.Name)
+		redisCmds := map[string]bool{
+			"get": true, "set": true, "del": true, "keys": true, "ping": true, "exists": true,
+			"hget": true, "hset": true, "hdel": true, "hgetall": true, "sadd": true, "srem": true,
+			"lpush": true, "rpop": true, "incr": true, "decr": true, "expire": true, "ttl": true,
+		}
+		if redisCmds[spanNameLower] {
+			// Corroborate with port, peer name, or database tags
+			if portStr == "6379" || portStr == "6380" || strings.Contains(peerName, "redis") || strings.Contains(peerName, "cache") || span.Attributes["db.name"] != "" {
+				inferredSystem = "redis"
+				isDb = true
+			}
+		}
+	}
+
+	// 6. Generic Messaging destination heuristics
+	if inferredSystem == "" {
+		_, hasMsgDest := span.Attributes["messaging.destination"]
+		if !hasMsgDest {
+			_, hasMsgDest = span.Attributes["messaging.destination.name"]
+		}
+		if !hasMsgDest {
+			_, hasMsgDest = span.Attributes["messaging.destination_name"]
+		}
+		if hasMsgDest {
+			// Refine based on broker ports or host names
+			if portStr == "9092" || portStr == "9093" || portStr == "9094" || strings.Contains(peerName, "kafka") {
+				inferredSystem = "kafka"
+				isMsg = true
+			} else if portStr == "5672" || portStr == "5671" || portStr == "15672" || strings.Contains(peerName, "rabbit") || strings.Contains(peerName, "amqp") {
+				inferredSystem = "rabbitmq"
+				isMsg = true
+			} else {
+				inferredSystem = "message_bus"
+				isMsg = true
+			}
+		}
+	}
+
+	// 7. Special case: explicitly check database IP addresses like the user's "10.254.5.30"
+	if inferredSystem == "" && (peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30")) {
+		inferredSystem = "database"
+		isDb = true
+	}
+
+	// 8. Explicit check if database attributes (like db.statement or db.name) exist
+	dbStmt := span.Attributes["db.statement"]
+	_, hasDbName := span.Attributes["db.name"]
+	if (hasDbName || dbStmt != "") && (inferredSystem == "" || inferredSystem == "database") {
+		isDb = true
+		
+		// Attempt to refine generic "database" system into a specific brand using SQL syntax analysis
+		if dbStmt != "" {
+			q := strings.ToLower(dbStmt)
+			
+			// postgresql patterns (type casts, double quotes around table/column names, postgres functions, pg client prefixes)
+			hasPgCast := strings.Contains(dbStmt, "::")
+			hasDoubleQuote := strings.Contains(dbStmt, `"`) && !strings.Contains(dbStmt, "`")
+			hasPgFunc := strings.Contains(q, "now()") || strings.Contains(q, "string_agg(") || strings.Contains(q, "coalesce(")
+			hasPgParams := strings.Contains(dbStmt, "$1") || strings.Contains(dbStmt, "$2")
+			
+			if hasPgCast || hasPgParams || (hasDoubleQuote && (hasPgFunc || strings.Contains(q, "select ") || strings.Contains(q, "insert ") || strings.Contains(q, "update "))) {
+				inferredSystem = "postgresql"
+			} else if strings.Contains(dbStmt, "`") {
+				inferredSystem = "mysql"
+			} else if strings.Contains(dbStmt, "[") && strings.Contains(dbStmt, "]") && strings.Contains(q, "select") {
+				inferredSystem = "mssql"
+			} else if strings.Contains(q, " rownum") || strings.Contains(q, "sysdate") || strings.Contains(q, "nvl(") {
+				inferredSystem = "oracle"
+			} else if inferredSystem == "" {
+				inferredSystem = "database"
+			}
+		} else if inferredSystem == "" {
+			inferredSystem = "database"
+		}
+	}
+
+	// 9. Apply the inferred attributes
+	if isDb && inferredSystem != "" {
+		span.Attributes["db.system"] = inferredSystem
+	} else if isMsg && inferredSystem != "" {
+		span.Attributes["messaging.system"] = inferredSystem
+	}
+}
+
+// updateStats maintains in-memory service statistics
+func (s *Store) updateStats(span *models.Span) {
+	key := span.Namespace + ":" + span.ServiceName
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+
+	stat, ok := s.statsCache[key]
+	if !ok {
+		stat = &models.ServiceStats{
+			ServiceName: span.ServiceName,
+			Namespace:   span.Namespace,
+		}
+		s.statsCache[key] = stat
+	}
+
+	stat.RequestCount++
+	if span.Status == models.SpanStatusError {
+		stat.ErrorCount++
+	}
+	if stat.RequestCount > 0 {
+		stat.ErrorRate = float64(stat.ErrorCount) / float64(stat.RequestCount) * 100
+	}
+	stat.LastSeen = time.Now()
+
+	n := float64(stat.RequestCount)
+	stat.P50Ms = (stat.P50Ms*(n-1) + span.DurationMs) / n
+}
+
+func (s *Store) updateRecentTraces(span *models.Span) {
+	s.tracesMu.Lock()
+	defer s.tracesMu.Unlock()
+
+	trace, ok := s.recentTraces[span.TraceID]
+	if !ok {
+		trace = &models.Trace{
+			TraceID: span.TraceID,
+		}
+		s.recentTraces[span.TraceID] = trace
+	}
+	
+	// Add span if not exists
+	exists := false
+	for _, sp := range trace.Spans {
+		if sp.SpanID == span.SpanID {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		trace.Spans = append(trace.Spans, span)
+		// Rebuild trace
+		updatedTrace := buildTrace(trace.TraceID, trace.Spans)
+		s.recentTraces[span.TraceID] = updatedTrace
+	}
+}
+
+func (s *Store) updateLocalStats(span *models.Span) {
+	key := span.Namespace + ":" + span.ServiceName
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+
+	stat, ok := s.localStats[key]
+	if !ok {
+		stat = &models.ServiceStats{
+			ServiceName: span.ServiceName,
+			Namespace:   span.Namespace,
+		}
+		s.localStats[key] = stat
+	}
+
+	stat.RequestCount++
+	if span.Status == models.SpanStatusError {
+		stat.ErrorCount++
+	}
+	if stat.RequestCount > 0 {
+		stat.ErrorRate = float64(stat.ErrorCount) / float64(stat.RequestCount) * 100
+	}
+	stat.LastSeen = time.Now()
+
+	n := float64(stat.RequestCount)
+	stat.P50Ms = (stat.P50Ms*(n-1) + span.DurationMs) / n
+}
+
+func (s *Store) updateLocalRecentTraces(span *models.Span) {
+	s.localMu.Lock()
+	defer s.localMu.Unlock()
+
+	trace, ok := s.localTraces[span.TraceID]
+	if !ok {
+		trace = &models.Trace{
+			TraceID: span.TraceID,
+		}
+		s.localTraces[span.TraceID] = trace
+	}
+	
+	exists := false
+	for _, sp := range trace.Spans {
+		if sp.SpanID == span.SpanID {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		trace.Spans = append(trace.Spans, span)
+		updatedTrace := buildTrace(trace.TraceID, trace.Spans)
+		s.localTraces[span.TraceID] = updatedTrace
+	}
+}
+
+// buildTrace assembles a Trace from raw spans
+func buildTrace(traceID string, spans []*models.Span) *models.Trace {
+	trace := &models.Trace{
+		TraceID:   traceID,
+		Spans:     spans,
+		SpanCount: len(spans),
+	}
+
+	var rootSpan *models.Span
+	var minStart, maxEnd time.Time
+	hasError := false
+
+	for _, sp := range spans {
+		if sp.ParentSpanID == "" {
+			rootSpan = sp
+		}
+		if minStart.IsZero() || sp.StartTime.Before(minStart) {
+			minStart = sp.StartTime
+		}
+		if maxEnd.IsZero() || sp.EndTime.After(maxEnd) {
+			maxEnd = sp.EndTime
+		}
+		if sp.Status == models.SpanStatusError {
+			hasError = true
+		}
+	}
+
+	trace.RootSpan = rootSpan
+	trace.StartTime = minStart
+	trace.EndTime = maxEnd
+	trace.HasError = hasError
+	trace.DurationMs = float64(maxEnd.Sub(minStart).Microseconds()) / 1000.0
+
+	if rootSpan != nil {
+		trace.Namespace = rootSpan.Namespace
+		trace.ServiceName = rootSpan.ServiceName
+	} else if len(spans) > 0 {
+		trace.Namespace = spans[0].Namespace
+		trace.ServiceName = spans[0].ServiceName
+	}
+
+	return trace
+}
+
+// GetRecentSpans returns all spans from in-memory traces, optionally filtered by namespace
+func (s *Store) GetRecentSpans(namespace string) []*models.Span {
+	s.tracesMu.RLock()
+	defer s.tracesMu.RUnlock()
+
+	var spans []*models.Span
+	for _, trace := range s.recentTraces {
+		if namespace != "" && trace.Namespace != namespace {
+			continue
+		}
+		spans = append(spans, trace.Spans...)
+	}
+	return spans
+}
