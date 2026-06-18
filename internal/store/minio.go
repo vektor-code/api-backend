@@ -246,11 +246,35 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	}
 
 	// 6. Explicit check if database attributes (like db.statement or db.name) exist
+	dbStmt := span.Attributes["db.statement"]
 	_, hasDbName := span.Attributes["db.name"]
-	_, hasDbStmt := span.Attributes["db.statement"]
-	if (hasDbName || hasDbStmt) && inferredSystem == "" {
-		inferredSystem = "database"
+	if (hasDbName || dbStmt != "") && (inferredSystem == "" || inferredSystem == "database") {
 		isDb = true
+		
+		// Attempt to refine generic "database" system into a specific brand using SQL syntax analysis
+		if dbStmt != "" {
+			q := strings.ToLower(dbStmt)
+			
+			// postgresql patterns (type casts, double quotes around table/column names, postgres functions, pg client prefixes)
+			hasPgCast := strings.Contains(dbStmt, "::")
+			hasDoubleQuote := strings.Contains(dbStmt, `"`) && !strings.Contains(dbStmt, "`")
+			hasPgFunc := strings.Contains(q, "now()") || strings.Contains(q, "string_agg(") || strings.Contains(q, "coalesce(")
+			hasPgParams := strings.Contains(dbStmt, "$1") || strings.Contains(dbStmt, "$2")
+			
+			if hasPgCast || hasPgParams || (hasDoubleQuote && (hasPgFunc || strings.Contains(q, "select ") || strings.Contains(q, "insert ") || strings.Contains(q, "update "))) {
+				inferredSystem = "postgresql"
+			} else if strings.Contains(dbStmt, "`") {
+				inferredSystem = "mysql"
+			} else if strings.Contains(dbStmt, "[") && strings.Contains(dbStmt, "]") && strings.Contains(q, "select") {
+				inferredSystem = "mssql"
+			} else if strings.Contains(q, " rownum") || strings.Contains(q, "sysdate") || strings.Contains(q, "nvl(") {
+				inferredSystem = "oracle"
+			} else if inferredSystem == "" {
+				inferredSystem = "database"
+			}
+		} else if inferredSystem == "" {
+			inferredSystem = "database"
+		}
 	}
 
 	// 7. Apply the inferred attributes
