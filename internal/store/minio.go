@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -943,6 +944,10 @@ func (s *Store) GetRecentSpans(namespace string) []*models.Span {
 
 // getInfraNodeName constructs a specific and unique identifier for database/queue target nodes
 func getInfraNodeName(span *models.Span, baseName string) string {
+	if strings.ToLower(baseName) == "dns" {
+		return "DNS"
+	}
+
 	dbName := span.Attributes["db.name"]
 	msgDest := span.Attributes["messaging.destination"]
 	if msgDest == "" {
@@ -1001,6 +1006,10 @@ func getClientDependencyName(span *models.Span) string {
 		return "vault"
 	}
 
+	if strings.Contains(strings.ToLower(span.Name), "dns") {
+		return "dns"
+	}
+
 	host := span.Attributes["server.address"]
 	if host == "" {
 		host = span.Attributes["net.peer.name"]
@@ -1047,6 +1056,10 @@ func (s *Store) parseK8sServiceAndNamespace(host string) (string, string) {
 	}
 	if idx := strings.Index(host, "/"); idx != -1 {
 		host = host[:idx]
+	}
+
+	if net.ParseIP(host) != nil {
+		return host, ""
 	}
 
 	parts := strings.Split(host, ".")
