@@ -328,15 +328,43 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 
 			if hasDb || hasMsg || (isClient && !parentSet[sp.SpanID]) {
 				baseName := ""
+				targetNamespace := ""
 				if hasDb {
 					baseName = dbSystem
 				} else if hasMsg {
 					baseName = messagingSystem
 				} else {
-					baseName = getClientDependencyName(sp)
+					rawHost := getClientDependencyName(sp)
+					var parsedNs string
+					baseName, parsedNs = s.parseK8sServiceAndNamespace(rawHost)
+					targetNamespace = parsedNs
 				}
 
 				if baseName != "" {
+					// Check if this represents a client call to a microservice rather than an infra node
+					if isClient && !hasDb && !hasMsg && s.isMicroservice(sp.Namespace, baseName) {
+						if targetNamespace == "" {
+							targetNamespace = s.resolveServiceNamespace(sp.Namespace, baseName)
+						}
+						edgeKey := sp.Namespace + ":" + sp.ServiceName + "->" + targetNamespace + ":" + baseName
+						e, ok := edgeMap[edgeKey]
+						if !ok {
+							e = &models.ServiceEdge{
+								Source:          sp.ServiceName,
+								Target:          baseName,
+								SourceNamespace: sp.Namespace,
+								TargetNamespace: targetNamespace,
+							}
+							edgeMap[edgeKey] = e
+						}
+						e.CallCount++
+						e.AvgDurationMs = (e.AvgDurationMs*float64(e.CallCount-1) + sp.DurationMs) / float64(e.CallCount)
+						if sp.Status == models.SpanStatusError {
+							e.ErrorCount++
+						}
+						continue
+					}
+
 					infraName := getInfraNodeName(sp, baseName)
 					
 					// Avoid self-loop rendering if client name matches service name
@@ -344,12 +372,14 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 						continue
 					}
 
-					edgeKey := sp.ServiceName + "->" + infraName
+					edgeKey := sp.Namespace + ":" + sp.ServiceName + "->" + sp.Namespace + ":" + infraName
 					e, ok := edgeMap[edgeKey]
 					if !ok {
 						e = &models.ServiceEdge{
-							Source: sp.ServiceName,
-							Target: infraName,
+							Source:          sp.ServiceName,
+							Target:          infraName,
+							SourceNamespace: sp.Namespace,
+							TargetNamespace: sp.Namespace,
 						}
 						edgeMap[edgeKey] = e
 					}
@@ -380,12 +410,14 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 
 			if sp.ParentSpanID == "" || sp.ParentSpanID == "0" || sp.ParentSpanID == "0000000000000000" {
 				// Trace entry point from external traffic
-				edgeKey := "Internet->" + sp.ServiceName
+				edgeKey := namespace + ":Internet->" + sp.Namespace + ":" + sp.ServiceName
 				e, ok := edgeMap[edgeKey]
 				if !ok {
 					e = &models.ServiceEdge{
-						Source: "Internet",
-						Target: sp.ServiceName,
+						Source:          "Internet",
+						Target:          sp.ServiceName,
+						SourceNamespace: namespace,
+						TargetNamespace: sp.Namespace,
 					}
 					edgeMap[edgeKey] = e
 				}
@@ -399,12 +431,14 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 			parent, ok := spanMap[sp.ParentSpanID]
 			if !ok {
 				// Orphan span whose parent is not in this trace fragment - count as external gateway call
-				edgeKey := "Internet->" + sp.ServiceName
+				edgeKey := namespace + ":Internet->" + sp.Namespace + ":" + sp.ServiceName
 				e, ok := edgeMap[edgeKey]
 				if !ok {
 					e = &models.ServiceEdge{
-						Source: "Internet",
-						Target: sp.ServiceName,
+						Source:          "Internet",
+						Target:          sp.ServiceName,
+						SourceNamespace: namespace,
+						TargetNamespace: sp.Namespace,
 					}
 					edgeMap[edgeKey] = e
 				}
@@ -418,12 +452,14 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 			if parent.ServiceName == sp.ServiceName {
 				continue
 			}
-			edgeKey := parent.ServiceName + "->" + sp.ServiceName
+			edgeKey := parent.Namespace + ":" + parent.ServiceName + "->" + sp.Namespace + ":" + sp.ServiceName
 			e, ok := edgeMap[edgeKey]
 			if !ok {
 				e = &models.ServiceEdge{
-					Source: parent.ServiceName,
-					Target: sp.ServiceName,
+					Source:          parent.ServiceName,
+					Target:          sp.ServiceName,
+					SourceNamespace: parent.Namespace,
+					TargetNamespace: sp.Namespace,
 				}
 				edgeMap[edgeKey] = e
 			}
@@ -488,6 +524,47 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 	}
 
 	return data, nil
+}
+
+// isMicroservice checks if a service name represents an instrumented service rather than infrastructure
+func (s *Store) isMicroservice(namespace string, name string) bool {
+	nameLower := strings.ToLower(name)
+	if strings.HasSuffix(nameLower, "-backend") || strings.HasSuffix(nameLower, "-frontend") || nameLower == "ingress-nginx" || nameLower == "gateway" {
+		return true
+	}
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	// Check if this service exists in our stats cache for this namespace
+	if _, ok := s.statsCache[namespace+":"+name]; ok {
+		return true
+	}
+	// Check in other namespaces
+	for key := range s.statsCache {
+		if strings.HasSuffix(key, ":"+name) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveServiceNamespace finds the namespace of a service in s.statsCache, falling back to default
+func (s *Store) resolveServiceNamespace(defaultNamespace string, serviceName string) string {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	// Check in defaultNamespace
+	if _, ok := s.statsCache[defaultNamespace+":"+serviceName]; ok {
+		return defaultNamespace
+	}
+	// Check in other namespaces
+	for key := range s.statsCache {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) == 2 && parts[1] == serviceName {
+			return parts[0]
+		}
+	}
+	return defaultNamespace
 }
 
 // updateStats maintains in-memory service statistics
@@ -907,5 +984,74 @@ func getClientDependencyName(span *models.Span) string {
 	}
 
 	return "external"
+}
+
+// parseK8sServiceAndNamespace extracts the clean microservice name and namespace from a target address
+func (s *Store) parseK8sServiceAndNamespace(host string) (string, string) {
+	if host == "" {
+		return "", ""
+	}
+	host = strings.ToLower(host)
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	if idx := strings.Index(host, "://"); idx != -1 {
+		host = host[idx+3:]
+	}
+	if idx := strings.Index(host, "/"); idx != -1 {
+		host = host[:idx]
+	}
+
+	parts := strings.Split(host, ".")
+	if len(parts) == 0 {
+		return "", ""
+	}
+
+	first := parts[0]
+	// If the service name ends with our standard suffixes, extract it and attempt to parse the namespace
+	if strings.HasSuffix(first, "-backend") || strings.HasSuffix(first, "-frontend") || first == "gateway" || first == "ingress-nginx" {
+		if len(parts) >= 2 {
+			return first, parts[1]
+		}
+		return first, ""
+	}
+
+	// Case 1: service.namespace.svc.cluster.local or service.namespace.svc
+	if len(parts) >= 3 && parts[2] == "svc" {
+		return parts[0], parts[1]
+	}
+
+	// Case 2: service.namespace where namespace is a known namespace
+	if len(parts) == 2 {
+		ns := parts[1]
+		s.statsMu.RLock()
+		hasNs := false
+		for key := range s.statsCache {
+			if strings.HasPrefix(key, ns+":") {
+				hasNs = true
+				break
+			}
+		}
+		s.statsMu.RUnlock()
+		if hasNs {
+			return parts[0], ns
+		}
+	}
+
+	// Case 3: check if any subsequent part matches a known namespace
+	if len(parts) > 2 {
+		s.statsMu.RLock()
+		defer s.statsMu.RUnlock()
+		for i := 1; i < len(parts); i++ {
+			ns := parts[i]
+			for key := range s.statsCache {
+				if strings.HasPrefix(key, ns+":") {
+					return parts[0], ns
+				}
+			}
+		}
+	}
+
+	return parts[0], ""
 }
 

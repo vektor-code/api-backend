@@ -102,11 +102,13 @@ type NamespaceStats struct {
 
 // ServiceEdge represents a dependency between two services
 type ServiceEdge struct {
-	Source      string  `json:"source"`
-	Target      string  `json:"target"`
-	CallCount   int64   `json:"callCount"`
-	ErrorCount  int64   `json:"errorCount"`
-	AvgDurationMs float64 `json:"avgDurationMs"`
+	Source          string  `json:"source"`
+	Target          string  `json:"target"`
+	SourceNamespace string  `json:"sourceNamespace,omitempty"`
+	TargetNamespace string  `json:"targetNamespace,omitempty"`
+	CallCount       int64   `json:"callCount"`
+	ErrorCount      int64   `json:"errorCount"`
+	AvgDurationMs   float64 `json:"avgDurationMs"`
 }
 
 // ServiceMapData is the full service dependency graph
