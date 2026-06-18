@@ -120,12 +120,7 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		return
 	}
 
-	// 1. If db.system is already set and not empty, we are done
-	if dbSys, ok := span.Attributes["db.system"]; ok && dbSys != "" {
-		return
-	}
-
-	// 2. Identify target addresses, service name, and ports
+	// 1. Identify target addresses, service name, and ports
 	peerName := strings.ToLower(span.Attributes["net.peer.name"])
 	if peerName == "" {
 		peerName = strings.ToLower(span.Attributes["server.address"])
@@ -152,8 +147,63 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	isDb := false
 	isMsg := false
 
-	// 3. Port-based inference
-	if portStr != "" {
+	// 2. Scan all span attributes to find explicit or implicit hints
+	for k, v := range span.Attributes {
+		valLower := strings.ToLower(v)
+		keyLower := strings.ToLower(k)
+
+		if keyLower == "db.system" && valLower != "" && valLower != "unknown" {
+			inferredSystem = valLower
+			isDb = true
+			break
+		}
+		if keyLower == "messaging.system" && valLower != "" && valLower != "unknown" {
+			inferredSystem = valLower
+			isMsg = true
+			break
+		}
+
+		// Check for connection string or identifier patterns
+		if strings.Contains(valLower, "redis://") || strings.Contains(valLower, "redis-") || valLower == "redis" {
+			inferredSystem = "redis"
+			isDb = true
+		}
+		if strings.Contains(valLower, "kafka") || strings.Contains(valLower, "broker-") {
+			inferredSystem = "kafka"
+			isMsg = true
+		}
+		if strings.Contains(valLower, "rabbitmq") || strings.Contains(valLower, "amqp://") || strings.Contains(valLower, "amqps://") {
+			inferredSystem = "rabbitmq"
+			isMsg = true
+		}
+		if strings.Contains(valLower, "minio") || strings.Contains(valLower, "s3.amazonaws") {
+			inferredSystem = "minio"
+			isDb = true
+		}
+		if strings.Contains(valLower, "vault") {
+			inferredSystem = "vault"
+			isDb = true
+		}
+		if strings.Contains(valLower, "clickhouse") {
+			inferredSystem = "clickhouse"
+			isDb = true
+		}
+		if strings.Contains(valLower, "liquibase") {
+			inferredSystem = "liquibase"
+			isDb = true
+		}
+		if strings.Contains(valLower, "nginx") {
+			inferredSystem = "nginx"
+			isDb = true
+		}
+		if strings.Contains(valLower, "kong") {
+			inferredSystem = "kong"
+			isDb = true
+		}
+	}
+
+	// 3. Port-based inference (including SSL / custom ports)
+	if inferredSystem == "" && portStr != "" {
 		switch portStr {
 		case "5432", "5433":
 			inferredSystem = "postgresql"
@@ -161,16 +211,16 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		case "3306", "33060":
 			inferredSystem = "mysql"
 			isDb = true
-		case "6379":
+		case "6379", "6380":
 			inferredSystem = "redis"
 			isDb = true
 		case "27017", "27018":
 			inferredSystem = "mongodb"
 			isDb = true
-		case "9092":
+		case "9092", "9093", "9094", "29092", "39092":
 			inferredSystem = "kafka"
 			isMsg = true
-		case "5672", "15672":
+		case "5671", "5672", "15672", "15671":
 			inferredSystem = "rabbitmq"
 			isMsg = true
 		case "1433":
@@ -181,6 +231,18 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 			isDb = true
 		case "9200", "9300":
 			inferredSystem = "elasticsearch"
+			isDb = true
+		case "8200", "8201":
+			inferredSystem = "vault"
+			isDb = true
+		case "9000", "9001":
+			inferredSystem = "minio"
+			isDb = true
+		case "8123", "9440":
+			inferredSystem = "clickhouse"
+			isDb = true
+		case "8000", "8443", "8001", "8444":
+			inferredSystem = "kong"
 			isDb = true
 		}
 	}
@@ -217,6 +279,24 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		if strings.Contains(str, "elasticsearch") || strings.Contains(str, "elastic") {
 			return "elasticsearch", true, false
 		}
+		if strings.Contains(str, "minio") || strings.Contains(str, "s3") {
+			return "minio", true, false
+		}
+		if strings.Contains(str, "vault") {
+			return "vault", true, false
+		}
+		if strings.Contains(str, "clickhouse") {
+			return "clickhouse", true, false
+		}
+		if strings.Contains(str, "liquibase") {
+			return "liquibase", true, false
+		}
+		if strings.Contains(str, "nginx") {
+			return "nginx", true, false
+		}
+		if strings.Contains(str, "kong") {
+			return "kong", true, false
+		}
 		if strings.Contains(str, "db") || strings.Contains(str, "database") || strings.Contains(str, "sql") {
 			return "database", true, false
 		}
@@ -239,13 +319,54 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		}
 	}
 
-	// 5. Special case: explicitly check database IP addresses like the user's "10.254.5.30"
+	// 5. Redis Command Name checks (when span name is exactly a command like GET/SET)
+	if inferredSystem == "" {
+		spanNameLower := strings.ToLower(span.Name)
+		redisCmds := map[string]bool{
+			"get": true, "set": true, "del": true, "keys": true, "ping": true, "exists": true,
+			"hget": true, "hset": true, "hdel": true, "hgetall": true, "sadd": true, "srem": true,
+			"lpush": true, "rpop": true, "incr": true, "decr": true, "expire": true, "ttl": true,
+		}
+		if redisCmds[spanNameLower] {
+			// Corroborate with port, peer name, or database tags
+			if portStr == "6379" || portStr == "6380" || strings.Contains(peerName, "redis") || strings.Contains(peerName, "cache") || span.Attributes["db.name"] != "" {
+				inferredSystem = "redis"
+				isDb = true
+			}
+		}
+	}
+
+	// 6. Generic Messaging destination heuristics
+	if inferredSystem == "" {
+		_, hasMsgDest := span.Attributes["messaging.destination"]
+		if !hasMsgDest {
+			_, hasMsgDest = span.Attributes["messaging.destination.name"]
+		}
+		if !hasMsgDest {
+			_, hasMsgDest = span.Attributes["messaging.destination_name"]
+		}
+		if hasMsgDest {
+			// Refine based on broker ports or host names
+			if portStr == "9092" || portStr == "9093" || portStr == "9094" || strings.Contains(peerName, "kafka") {
+				inferredSystem = "kafka"
+				isMsg = true
+			} else if portStr == "5672" || portStr == "5671" || portStr == "15672" || strings.Contains(peerName, "rabbit") || strings.Contains(peerName, "amqp") {
+				inferredSystem = "rabbitmq"
+				isMsg = true
+			} else {
+				inferredSystem = "message_bus"
+				isMsg = true
+			}
+		}
+	}
+
+	// 7. Special case: explicitly check database IP addresses like the user's "10.254.5.30"
 	if inferredSystem == "" && (peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30")) {
 		inferredSystem = "database"
 		isDb = true
 	}
 
-	// 6. Explicit check if database attributes (like db.statement or db.name) exist
+	// 8. Explicit check if database attributes (like db.statement or db.name) exist
 	dbStmt := span.Attributes["db.statement"]
 	_, hasDbName := span.Attributes["db.name"]
 	if (hasDbName || dbStmt != "") && (inferredSystem == "" || inferredSystem == "database") {
@@ -277,7 +398,7 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		}
 	}
 
-	// 7. Apply the inferred attributes
+	// 9. Apply the inferred attributes
 	if isDb && inferredSystem != "" {
 		span.Attributes["db.system"] = inferredSystem
 	} else if isMsg && inferredSystem != "" {
