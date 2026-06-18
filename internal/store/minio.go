@@ -81,6 +81,8 @@ func (s *Store) Close() error {
 
 // SaveSpan writes a span to MinIO
 func (s *Store) SaveSpan(span *models.Span) error {
+	s.enrichSpanMetadata(span)
+
 	data, err := json.Marshal(span)
 	if err != nil {
 		return err
@@ -101,6 +103,162 @@ func (s *Store) SaveSpan(span *models.Span) error {
 	s.updateLocalStats(span)
 	s.updateLocalRecentTraces(span)
 	return nil
+}
+
+// enrichSpanMetadata fills in missing metadata like db.system for uninstrumented databases
+func (s *Store) enrichSpanMetadata(span *models.Span) {
+	if span == nil {
+		return
+	}
+	if span.Attributes == nil {
+		span.Attributes = make(map[string]string)
+	}
+
+	// Only process CLIENT spans
+	isClient := span.Kind == models.SpanKindClient || span.Kind == "CLIENT"
+	if !isClient {
+		return
+	}
+
+	// 1. If db.system is already set and not empty, we are done
+	if dbSys, ok := span.Attributes["db.system"]; ok && dbSys != "" {
+		return
+	}
+
+	// 2. Identify target addresses, service name, and ports
+	peerName := strings.ToLower(span.Attributes["net.peer.name"])
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["server.address"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["peer.service"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["net.peer.ip"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(span.Attributes["network.peer.address"])
+	}
+
+	portStr := span.Attributes["server.port"]
+	if portStr == "" {
+		portStr = span.Attributes["net.peer.port"]
+	}
+	if portStr == "" {
+		portStr = span.Attributes["peer.port"]
+	}
+
+	inferredSystem := ""
+	isDb := false
+	isMsg := false
+
+	// 3. Port-based inference
+	if portStr != "" {
+		switch portStr {
+		case "5432", "5433":
+			inferredSystem = "postgresql"
+			isDb = true
+		case "3306", "33060":
+			inferredSystem = "mysql"
+			isDb = true
+		case "6379":
+			inferredSystem = "redis"
+			isDb = true
+		case "27017", "27018":
+			inferredSystem = "mongodb"
+			isDb = true
+		case "9092":
+			inferredSystem = "kafka"
+			isMsg = true
+		case "5672", "15672":
+			inferredSystem = "rabbitmq"
+			isMsg = true
+		case "1433":
+			inferredSystem = "mssql"
+			isDb = true
+		case "1521":
+			inferredSystem = "oracle"
+			isDb = true
+		case "9200", "9300":
+			inferredSystem = "elasticsearch"
+			isDb = true
+		}
+	}
+
+	// Helper to match database substrings
+	checkSubstrings := func(str string) (string, bool, bool) {
+		if str == "" {
+			return "", false, false
+		}
+		if strings.Contains(str, "postgres") || (strings.Contains(str, "pg") && !strings.Contains(str, "png") && !strings.Contains(str, "page")) {
+			return "postgresql", true, false
+		}
+		if strings.Contains(str, "redis") {
+			return "redis", true, false
+		}
+		if strings.Contains(str, "mysql") {
+			return "mysql", true, false
+		}
+		if strings.Contains(str, "mongo") {
+			return "mongodb", true, false
+		}
+		if strings.Contains(str, "oracle") {
+			return "oracle", true, false
+		}
+		if strings.Contains(str, "mssql") || strings.Contains(str, "sqlserver") {
+			return "mssql", true, false
+		}
+		if strings.Contains(str, "kafka") {
+			return "kafka", false, true
+		}
+		if strings.Contains(str, "rabbitmq") || strings.Contains(str, "amqp") {
+			return "rabbitmq", false, true
+		}
+		if strings.Contains(str, "elasticsearch") || strings.Contains(str, "elastic") {
+			return "elasticsearch", true, false
+		}
+		if strings.Contains(str, "db") || strings.Contains(str, "database") || strings.Contains(str, "sql") {
+			return "database", true, false
+		}
+		return "", false, false
+	}
+
+	// 4. Substring-based inference from peer name / service / span name
+	if inferredSystem == "" {
+		if sys, db, msg := checkSubstrings(strings.ToLower(span.Name)); sys != "" {
+			inferredSystem = sys
+			isDb = db
+			isMsg = msg
+		}
+	}
+	if inferredSystem == "" && peerName != "" {
+		if sys, db, msg := checkSubstrings(peerName); sys != "" {
+			inferredSystem = sys
+			isDb = db
+			isMsg = msg
+		}
+	}
+
+	// 5. Special case: explicitly check database IP addresses like the user's "10.254.5.30"
+	if inferredSystem == "" && (peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30")) {
+		inferredSystem = "database"
+		isDb = true
+	}
+
+	// 6. Explicit check if database attributes (like db.statement or db.name) exist
+	_, hasDbName := span.Attributes["db.name"]
+	_, hasDbStmt := span.Attributes["db.statement"]
+	if (hasDbName || hasDbStmt) && inferredSystem == "" {
+		inferredSystem = "database"
+		isDb = true
+	}
+
+	// 7. Apply the inferred attributes
+	if isDb && inferredSystem != "" {
+		span.Attributes["db.system"] = inferredSystem
+	} else if isMsg && inferredSystem != "" {
+		span.Attributes["messaging.system"] = inferredSystem
+	}
 }
 
 // GetTrace retrieves a trace by ID
@@ -161,6 +319,7 @@ func (s *Store) getSpanObject(ctx context.Context, key string) (*models.Span, er
 	if err := json.Unmarshal(data, &span); err != nil {
 		return nil, err
 	}
+	s.enrichSpanMetadata(&span)
 	return &span, nil
 }
 
@@ -362,6 +521,7 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		spanMap := make(map[string]*models.Span)
 		parentSet := make(map[string]bool)
 		for _, sp := range trace.Spans {
+			s.enrichSpanMetadata(sp)
 			spanMap[sp.SpanID] = sp
 			if sp.ParentSpanID != "" {
 				parentSet[sp.ParentSpanID] = true
@@ -369,6 +529,7 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		}
 
 		for _, sp := range trace.Spans {
+			s.enrichSpanMetadata(sp)
 			// Check for external database or messaging infrastructure calls, or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
 			dbSystem, hasDb := sp.Attributes["db.system"]
 			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
