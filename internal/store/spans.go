@@ -48,7 +48,7 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	}
 
 	// Try to resolve/extract database name if missing or generic
-	if dbName := parseDbNameFromAttributes(span.Attributes); dbName != "" {
+	if dbName := parseDbNameFromAttributes(span); dbName != "" {
 		span.Attributes["db.name"] = dbName
 	}
 
@@ -513,44 +513,104 @@ func (s *Store) GetRecentSpans(namespace string) []*models.Span {
 }
 
 // parseDbNameFromAttributes resolves/extracts db name from OpenTelemetry tags
-func parseDbNameFromAttributes(attrs map[string]string) string {
-	if attrs == nil {
+func parseDbNameFromAttributes(span *models.Span) string {
+	if span == nil || span.Attributes == nil {
 		return ""
 	}
+	attrs := span.Attributes
 
 	// 1. If db.name already exists and is non-empty, use it
-	if dbName, ok := attrs["db.name"]; ok && dbName != "" {
-		return dbName
-	}
+	dbName := attrs["db.name"]
 
 	// 2. Try db.instance (older semantic conventions)
-	if dbInst, ok := attrs["db.instance"]; ok && dbInst != "" {
-		return dbInst
+	if dbName == "" {
+		dbName = attrs["db.instance"]
 	}
 
 	// 3. Try db.namespace (newer semantic conventions)
-	if dbNs, ok := attrs["db.namespace"]; ok && dbNs != "" {
-		return dbNs
+	if dbName == "" {
+		dbName = attrs["db.namespace"]
 	}
 
 	// 4. Try parsing from db.connection_string, db.url, or db.dsn
-	connKeys := []string{"db.connection_string", "db.url", "db.dsn"}
-	for _, key := range connKeys {
-		if connStr, ok := attrs[key]; ok && connStr != "" {
-			if dbName := extractDbNameFromConnStr(connStr); dbName != "" {
-				return dbName
+	if dbName == "" {
+		connKeys := []string{"db.connection_string", "db.url", "db.dsn"}
+		for _, key := range connKeys {
+			if connStr, ok := attrs[key]; ok && connStr != "" {
+				if parsed := extractDbNameFromConnStr(connStr); parsed != "" {
+					dbName = parsed
+					break
+				}
 			}
 		}
 	}
 
 	// 5. Try parsing from db.statement (e.g. USE statement)
-	if stmt, ok := attrs["db.statement"]; ok && stmt != "" {
-		if dbName := extractDbNameFromSQL(stmt); dbName != "" {
-			return dbName
+	if dbName == "" {
+		if stmt, ok := attrs["db.statement"]; ok && stmt != "" {
+			if parsed := extractDbNameFromSQL(stmt); parsed != "" {
+				dbName = parsed
+			}
 		}
 	}
 
-	return ""
+	// Normalize database name
+	dbName = strings.TrimSpace(strings.ToLower(dbName))
+
+	// 6. Heuristic mapping: Resolve target database host IP to apply service-based fallbacks
+	peerName := strings.ToLower(attrs["net.peer.name"])
+	if peerName == "" {
+		peerName = strings.ToLower(attrs["server.address"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(attrs["peer.service"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(attrs["net.peer.ip"])
+	}
+	if peerName == "" {
+		peerName = strings.ToLower(attrs["network.peer.address"])
+	}
+
+	connStr := strings.ToLower(attrs["db.connection_string"])
+	isDbHost := peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30") || strings.Contains(connStr, "10.254.5.30")
+
+	// Correct any truncated names (e.g. "rmis_project_backend_d" -> "rmis_project_backend_dev")
+	if strings.HasPrefix(dbName, "rmis_project_backend_d") {
+		dbName = "rmis_project_backend_dev"
+	}
+
+	// If calling our database host, apply namespace/service fallbacks to map missing database names
+	if isDbHost {
+		serviceLower := strings.ToLower(span.ServiceName)
+		nsLower := strings.ToLower(span.Namespace)
+
+		if dbName == "" || dbName == "unknown" || dbName == "postgres" || dbName == "postgresql" {
+			if strings.Contains(nsLower, "emuhasibatliq") || strings.Contains(serviceLower, "emuhasibatliq") {
+				dbName = "emuhasibatliq_dev"
+			} else if strings.Contains(nsLower, "econtract") || strings.Contains(serviceLower, "econtract") {
+				dbName = "econtract_dev"
+			} else if strings.Contains(nsLower, "rmis") || strings.Contains(serviceLower, "rmis") {
+				if strings.Contains(serviceLower, "project") {
+					dbName = "rmis_project_backend_dev"
+				} else if strings.Contains(serviceLower, "iam") {
+					dbName = "rmis_iam_backend_dev"
+				} else if strings.Contains(serviceLower, "dictionary") {
+					dbName = "rmis_dictionary_backend_dev"
+				} else if strings.Contains(serviceLower, "agroprom") {
+					dbName = "rmis_agroprom_backend_dev"
+				} else if strings.Contains(serviceLower, "gendoc") {
+					dbName = "rmis_gendoc_backend_dev"
+				} else {
+					cleanSvc := strings.TrimSuffix(serviceLower, "-backend")
+					cleanSvc = strings.TrimPrefix(cleanSvc, "rmis-")
+					dbName = "rmis_" + cleanSvc + "_dev"
+				}
+			}
+		}
+	}
+
+	return dbName
 }
 
 // extractDbNameFromConnStr parses host URL and DSN/PDO formats to extract schema names
