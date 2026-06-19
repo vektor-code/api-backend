@@ -123,6 +123,28 @@ func (s *Store) parseK8sServiceAndNamespace(host string) (string, string) {
 		host = host[:idx]
 	}
 
+	// Custom mapping for domain names to internal Kubernetes services
+	// e.g. rmis-gendoc-dev.mof.az -> service: gendoc-backend, namespace: rmis-dev
+	nsPrefixes := []string{"rmis", "emuhasibatliq", "econtract"}
+	for _, pref := range nsPrefixes {
+		prefixDash := pref + "-"
+		if strings.HasPrefix(host, prefixDash) {
+			cleanHost := host
+			if strings.HasSuffix(cleanHost, ".mof.az") {
+				cleanHost = strings.TrimSuffix(cleanHost, ".mof.az")
+			}
+			if strings.HasSuffix(cleanHost, "-dev") {
+				svc := strings.TrimPrefix(cleanHost, prefixDash)
+				svc = strings.TrimSuffix(svc, "-dev")
+				targetSvc := svc
+				if !strings.HasSuffix(targetSvc, "-backend") && !strings.HasSuffix(targetSvc, "-frontend") {
+					targetSvc = svc + "-backend"
+				}
+				return targetSvc, pref + "-dev"
+			}
+		}
+	}
+
 	if net.ParseIP(host) != nil {
 		return host, ""
 	}
