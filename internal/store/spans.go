@@ -348,6 +348,12 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	} else if isMsg && inferredSystem != "" {
 		span.Attributes["messaging.system"] = inferredSystem
 	}
+
+	// 10. Detect if it is a 3rd-party external call
+	if is3rdParty, toolName := s.isThirdPartySpan(span); is3rdParty {
+		span.Attributes["external.service"] = toolName
+		span.Attributes["external.service.is3rdparty"] = "true"
+	}
 }
 
 // updateStats maintains in-memory service statistics
@@ -696,4 +702,111 @@ func extractDbNameFromSQL(stmt string) string {
 		}
 	}
 	return ""
+}
+
+// isThirdPartySpan checks if a client span is calling a 3rd-party external tool/API
+func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
+	if span.Kind != models.SpanKindClient && span.Kind != "CLIENT" {
+		return false, ""
+	}
+	// If it has a db.system or messaging.system, it's database/infra, not a 3rd-party tool
+	if span.Attributes["db.system"] != "" || span.Attributes["messaging.system"] != "" {
+		return false, ""
+	}
+	
+	host := span.Attributes["server.address"]
+	if host == "" {
+		host = span.Attributes["net.peer.name"]
+	}
+	if host == "" {
+		host = span.Attributes["http.host"]
+	}
+	if host == "" {
+		if urlStr := span.Attributes["http.url"]; urlStr != "" {
+			if idx := strings.Index(urlStr, "://"); idx != -1 {
+				rem := urlStr[idx+3:]
+				if endIdx := strings.IndexAny(rem, ":/"); endIdx != -1 {
+					host = rem[:endIdx]
+				} else {
+					host = rem
+				}
+			}
+		}
+	}
+	
+	if host == "" {
+		return false, ""
+	}
+	
+	hostLower := strings.ToLower(host)
+	cleanHost := hostLower
+	if idx := strings.Index(cleanHost, ":"); idx != -1 {
+		cleanHost = cleanHost[:idx]
+	}
+	
+	// Skip localhost, local IP addresses, and private cluster ranges
+	if cleanHost == "localhost" || cleanHost == "127.0.0.1" || strings.HasPrefix(cleanHost, "10.") || strings.HasPrefix(cleanHost, "192.168.") || strings.HasPrefix(cleanHost, "172.") {
+		return false, ""
+	}
+	
+	if strings.HasSuffix(cleanHost, ".local") || strings.HasSuffix(cleanHost, ".svc") || strings.Contains(cleanHost, ".svc.cluster") || strings.HasSuffix(cleanHost, ".internal") {
+		return false, ""
+	}
+	
+	// Check if this host matches an internal microservice name
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+	for key := range s.statsCache {
+		parts := strings.Split(key, ":")
+		if len(parts) == 2 && parts[1] == cleanHost {
+			return false, ""
+		}
+	}
+	
+	hasDot := strings.Contains(cleanHost, ".")
+	
+	// Determine 3rd-party tool name
+	toolName := ""
+	if strings.Contains(cleanHost, "stripe") {
+		toolName = "Stripe"
+	} else if strings.Contains(cleanHost, "paypal") {
+		toolName = "PayPal"
+	} else if strings.Contains(cleanHost, "openai") {
+		toolName = "OpenAI"
+	} else if strings.Contains(cleanHost, "anthropic") {
+		toolName = "Anthropic"
+	} else if strings.Contains(cleanHost, "twilio") {
+		toolName = "Twilio"
+	} else if strings.Contains(cleanHost, "sendgrid") {
+		toolName = "SendGrid"
+	} else if strings.Contains(cleanHost, "mailgun") {
+		toolName = "Mailgun"
+	} else if strings.Contains(cleanHost, "sentry") {
+		toolName = "Sentry"
+	} else if strings.Contains(cleanHost, "github") {
+		toolName = "GitHub"
+	} else if strings.Contains(cleanHost, "slack") {
+		toolName = "Slack"
+	} else if strings.Contains(cleanHost, "discord") {
+		toolName = "Discord"
+	} else if strings.Contains(cleanHost, "auth0") {
+		toolName = "Auth0"
+	} else if strings.Contains(cleanHost, "okta") {
+		toolName = "Okta"
+	} else if strings.Contains(cleanHost, "mygov") {
+		toolName = "MyGov"
+	} else if strings.Contains(cleanHost, "egov") {
+		toolName = "e-Gov"
+	} else if strings.Contains(cleanHost, "google") || strings.Contains(cleanHost, "googleapis") {
+		toolName = "Google API"
+	} else if strings.Contains(cleanHost, "facebook") {
+		toolName = "Facebook API"
+	} else {
+		if !hasDot {
+			return false, ""
+		}
+		toolName = cleanHost
+	}
+	
+	return true, toolName
 }

@@ -41,6 +41,7 @@ func (s *Store) GetTrace(traceID string) (*models.Trace, error) {
 		if strings.Contains(obj.Key, "/"+traceID+"/") {
 			sp, err := s.getSpanObject(ctx, obj.Key)
 			if err == nil {
+				s.enrichSpanMetadata(sp)
 				spans = append(spans, sp)
 			}
 		}
@@ -104,14 +105,28 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 			continue
 		}
 
-		// Collect unique services involved in this trace
+		// Collect unique services and 3rd-party tools involved in this trace
 		svcSet := make(map[string]bool)
+		toolSet := make(map[string]bool)
 		for _, sp := range trace.Spans {
 			svcSet[sp.ServiceName] = true
+			if is3rd, tool := s.isThirdPartySpan(sp); is3rd {
+				toolSet[tool] = true
+			}
+			if dbSys := sp.Attributes["db.system"]; dbSys != "" {
+				toolSet[dbSys] = true
+			}
+			if msgSys := sp.Attributes["messaging.system"]; msgSys != "" {
+				toolSet[msgSys] = true
+			}
 		}
 		var svcs []string
 		for svc := range svcSet {
 			svcs = append(svcs, svc)
+		}
+		var tools []string
+		for tool := range toolSet {
+			tools = append(tools, tool)
 		}
 
 		var errType string
@@ -160,16 +175,17 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 		}
 
 		item := &models.TraceListItem{
-			TraceID:      trace.TraceID,
-			ServiceName:  trace.ServiceName,
-			Namespace:    trace.Namespace,
-			StartTime:    trace.StartTime,
-			DurationMs:   trace.DurationMs,
-			SpanCount:    trace.SpanCount,
-			HasError:     trace.HasError,
-			Services:     svcs,
-			ErrorType:    errType,
-			ErrorSummary: errSummary,
+			TraceID:         trace.TraceID,
+			ServiceName:     trace.ServiceName,
+			Namespace:       trace.Namespace,
+			StartTime:       trace.StartTime,
+			DurationMs:      trace.DurationMs,
+			SpanCount:       trace.SpanCount,
+			HasError:        trace.HasError,
+			Services:        svcs,
+			ThirdPartyTools: tools,
+			ErrorType:       errType,
+			ErrorSummary:    errSummary,
 		}
 		if trace.RootSpan != nil {
 			item.RootName = trace.RootSpan.Name
