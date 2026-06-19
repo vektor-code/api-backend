@@ -25,6 +25,11 @@ func (s *Store) runGC() {
 				delete(s.localTraces, id)
 			}
 		}
+		for key, stat := range s.localStats {
+			if stat.LastSeen.Before(cutoff) {
+				delete(s.localStats, key)
+			}
+		}
 		s.localMu.Unlock()
 	}
 }

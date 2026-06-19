@@ -47,6 +47,11 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		span.Attributes = make(map[string]string)
 	}
 
+	// Try to resolve/extract database name if missing or generic
+	if dbName := parseDbNameFromAttributes(span.Attributes); dbName != "" {
+		span.Attributes["db.name"] = dbName
+	}
+
 	// Only process CLIENT spans
 	isClient := span.Kind == models.SpanKindClient || span.Kind == "CLIENT"
 	if !isClient {
@@ -505,4 +510,123 @@ func (s *Store) GetRecentSpans(namespace string) []*models.Span {
 		spans = append(spans, trace.Spans...)
 	}
 	return spans
+}
+
+// parseDbNameFromAttributes resolves/extracts db name from OpenTelemetry tags
+func parseDbNameFromAttributes(attrs map[string]string) string {
+	if attrs == nil {
+		return ""
+	}
+
+	// 1. If db.name already exists and is non-empty, use it
+	if dbName, ok := attrs["db.name"]; ok && dbName != "" {
+		return dbName
+	}
+
+	// 2. Try db.instance (older semantic conventions)
+	if dbInst, ok := attrs["db.instance"]; ok && dbInst != "" {
+		return dbInst
+	}
+
+	// 3. Try db.namespace (newer semantic conventions)
+	if dbNs, ok := attrs["db.namespace"]; ok && dbNs != "" {
+		return dbNs
+	}
+
+	// 4. Try parsing from db.connection_string, db.url, or db.dsn
+	connKeys := []string{"db.connection_string", "db.url", "db.dsn"}
+	for _, key := range connKeys {
+		if connStr, ok := attrs[key]; ok && connStr != "" {
+			if dbName := extractDbNameFromConnStr(connStr); dbName != "" {
+				return dbName
+			}
+		}
+	}
+
+	// 5. Try parsing from db.statement (e.g. USE statement)
+	if stmt, ok := attrs["db.statement"]; ok && stmt != "" {
+		if dbName := extractDbNameFromSQL(stmt); dbName != "" {
+			return dbName
+		}
+	}
+
+	return ""
+}
+
+// extractDbNameFromConnStr parses host URL and DSN/PDO formats to extract schema names
+func extractDbNameFromConnStr(connStr string) string {
+	connStr = strings.TrimSpace(connStr)
+	if connStr == "" {
+		return ""
+	}
+
+	// Case A: standard URL scheme (e.g. postgresql://user:pass@host:port/dbname?query=...)
+	if strings.Contains(connStr, "://") {
+		parts := strings.SplitN(connStr, "://", 2)
+		if len(parts) == 2 {
+			rem := parts[1]
+			atIdx := strings.LastIndex(rem, "@")
+			hostPart := rem
+			if atIdx != -1 {
+				hostPart = rem[atIdx+1:]
+			}
+
+			slashIdx := strings.Index(hostPart, "/")
+			if slashIdx != -1 {
+				dbPart := hostPart[slashIdx+1:]
+				if qIdx := strings.Index(dbPart, "?"); qIdx != -1 {
+					dbPart = dbPart[:qIdx]
+				}
+				if hashIdx := strings.Index(dbPart, "#"); hashIdx != -1 {
+					dbPart = dbPart[:hashIdx]
+				}
+				dbPart = strings.TrimSpace(dbPart)
+				if dbPart != "" {
+					return dbPart
+				}
+			}
+		}
+	}
+
+	// Case B: DSN format (key=value pairs separated by semicolons, spaces, or commas)
+	// Example: mysql:host=10.254.5.30;dbname=emuhasibatliq_dev
+	normalized := connStr
+	normalized = strings.ReplaceAll(normalized, ";", " ")
+	normalized = strings.ReplaceAll(normalized, ",", " ")
+
+	if colonIdx := strings.Index(normalized, ":"); colonIdx != -1 && !strings.Contains(normalized[:colonIdx], "=") {
+		normalized = normalized[colonIdx+1:]
+	}
+
+	words := strings.Fields(normalized)
+	for _, word := range words {
+		if strings.Contains(word, "=") {
+			kv := strings.SplitN(word, "=", 2)
+			if len(kv) == 2 {
+				k := strings.ToLower(strings.TrimSpace(kv[0]))
+				v := strings.TrimSpace(kv[1])
+				v = strings.Trim(v, `"'`)
+				if k == "dbname" || k == "database" || k == "databasename" || k == "initial catalog" {
+					if v != "" {
+						return v
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractDbNameFromSQL extracts database name from statements like USE
+func extractDbNameFromSQL(stmt string) string {
+	q := strings.ToLower(strings.TrimSpace(stmt))
+	if strings.HasPrefix(q, "use ") {
+		parts := strings.Fields(q)
+		if len(parts) >= 2 {
+			db := strings.Trim(parts[1], `;"'`)
+			return db
+		}
+	}
+	return ""
 }
