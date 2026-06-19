@@ -83,6 +83,11 @@ func (s *Store) syncState() {
 	newStatsCache := make(map[string]*models.ServiceStats)
 	newRecentTraces := make(map[string]*models.Trace)
 
+	ourKey := fmt.Sprintf("state/pod-%s.json", hn)
+	var objects []minio.ObjectInfo
+	var refTime time.Time
+
+	// List objects once and locate our own object's LastModified time to use as reference clock
 	for obj := range s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
 		Prefix:    "state/",
 		Recursive: false,
@@ -90,10 +95,22 @@ func (s *Store) syncState() {
 		if obj.Err != nil {
 			continue
 		}
+		objects = append(objects, obj)
+		if obj.Key == ourKey {
+			refTime = obj.LastModified
+		}
+	}
 
-		// Delete state files that haven't been updated for over an hour (dead pods)
-		if obj.LastModified.Before(time.Now().Add(-1 * time.Hour)) {
-			_ = s.client.RemoveObject(ctx, s.bucketName, obj.Key, minio.RemoveObjectOptions{})
+	if refTime.IsZero() {
+		refTime = time.Now().UTC()
+	}
+
+	for _, obj := range objects {
+		// Delete state files that haven't been updated for over an hour relative to the server reference clock
+		if obj.LastModified.Before(refTime.Add(-1 * time.Hour)) {
+			if obj.Key != ourKey {
+				_ = s.client.RemoveObject(ctx, s.bucketName, obj.Key, minio.RemoveObjectOptions{})
+			}
 			continue
 		}
 
@@ -160,14 +177,16 @@ func (s *Store) syncState() {
 		}
 	}
 
-	// Hot-swap global caches
-	s.statsMu.Lock()
-	s.statsCache = newStatsCache
-	s.statsMu.Unlock()
+	// Hot-swap global caches only if we successfully retrieved and parsed state files
+	if len(objects) > 0 {
+		s.statsMu.Lock()
+		s.statsCache = newStatsCache
+		s.statsMu.Unlock()
 
-	s.tracesMu.Lock()
-	s.recentTraces = newRecentTraces
-	s.tracesMu.Unlock()
+		s.tracesMu.Lock()
+		s.recentTraces = newRecentTraces
+		s.tracesMu.Unlock()
+	}
 }
 
 // runMinioGC periodically deletes traces from MinIO that are older than 12 hours
