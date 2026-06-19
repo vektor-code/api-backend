@@ -556,6 +556,7 @@ func parseDbNameFromAttributes(span *models.Span) string {
 
 	// Normalize database name
 	dbName = strings.TrimSpace(strings.ToLower(dbName))
+	dbName = strings.Trim(dbName, "'\"` ")
 
 	// 6. Heuristic mapping: Resolve target database host IP to apply service-based fallbacks
 	peerName := strings.ToLower(attrs["net.peer.name"])
