@@ -52,9 +52,11 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		span.Attributes["db.name"] = dbName
 	}
 
-	// Only process CLIENT spans
-	isClient := span.Kind == models.SpanKindClient || span.Kind == "CLIENT"
-	if !isClient {
+	// Only process CLIENT, PRODUCER, and CONSUMER spans
+	isValidKind := span.Kind == models.SpanKindClient || span.Kind == "CLIENT" ||
+		span.Kind == models.SpanKindProducer || span.Kind == "PRODUCER" ||
+		span.Kind == models.SpanKindConsumer || span.Kind == "CONSUMER"
+	if !isValidKind {
 		return
 	}
 

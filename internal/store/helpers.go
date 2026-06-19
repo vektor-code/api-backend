@@ -10,6 +10,28 @@ import (
 // getInfraNodeName constructs a specific and unique identifier for database/queue target nodes
 func getInfraNodeName(span *models.Span, baseName string) string {
 	if strings.ToLower(baseName) == "dns" {
+		queryName := span.Attributes["dns.question.name"]
+		if queryName == "" {
+			queryName = span.Attributes["dns.question"]
+		}
+		if queryName == "" {
+			queryName = span.Attributes["dns.name"]
+		}
+		if queryName == "" {
+			queryName = span.Attributes["net.peer.name"]
+		}
+		if queryName == "" {
+			queryName = span.Attributes["server.address"]
+		}
+		// If the span name contains the query (e.g. "DNS lookup: google.com")
+		if queryName == "" && strings.Contains(span.Name, ":") {
+			parts := strings.SplitN(span.Name, ":", 2)
+			queryName = strings.TrimSpace(parts[1])
+		}
+
+		if queryName != "" {
+			return "DNS (" + strings.ToLower(queryName) + ")"
+		}
 		return "DNS"
 	}
 
