@@ -28,11 +28,48 @@ func getInfraNodeName(span *models.Span, baseName string) string {
 			parts := strings.SplitN(span.Name, ":", 2)
 			queryName = strings.TrimSpace(parts[1])
 		}
+		// Fallback: tokenize span name and extract the first token containing a dot with letters
+		if queryName == "" {
+			for _, word := range strings.Fields(span.Name) {
+				word = strings.Trim(word, ":(),;\"'")
+				if strings.Contains(word, ".") && len(word) > 3 {
+					hasLetter := false
+					for _, r := range word {
+						if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+							hasLetter = true
+							break
+						}
+					}
+					if hasLetter {
+						queryName = word
+						break
+					}
+				}
+			}
+		}
+		// Fallback 2: scan other attributes for a domain-like string
+		if queryName == "" {
+			for _, val := range span.Attributes {
+				if strings.Contains(val, ".") && len(val) > 4 && !strings.Contains(val, "/") && !strings.Contains(val, " ") {
+					hasLetter := false
+					for _, r := range val {
+						if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+							hasLetter = true
+							break
+						}
+					}
+					if hasLetter {
+						queryName = val
+						break
+					}
+				}
+			}
+		}
 
 		if queryName != "" {
-			return "DNS (" + strings.ToLower(queryName) + ")"
+			return "dns (" + strings.ToLower(queryName) + ")"
 		}
-		return "DNS"
+		return "dns"
 	}
 
 	dbName := span.Attributes["db.name"]
@@ -68,16 +105,27 @@ func getInfraNodeName(span *models.Span, baseName string) string {
 
 	resource := ""
 	if peerName != "" && resourceName != "" {
-		resource = peerName + "/" + resourceName
+		cleanRes := strings.Trim(resourceName, "()")
+		if cleanRes == "anonymous" || cleanRes == "unknown" {
+			resource = peerName
+		} else {
+			resource = peerName + "/" + cleanRes
+		}
 	} else if resourceName != "" {
-		resource = resourceName
+		cleanRes := strings.Trim(resourceName, "()")
+		if cleanRes == "anonymous" || cleanRes == "unknown" {
+			resource = ""
+		} else {
+			resource = cleanRes
+		}
 	} else if peerName != "" {
 		resource = peerName
-	} else {
-		resource = span.ServiceName
 	}
 
-	return strings.ToLower(baseName) + " (" + resource + ")"
+	if resource != "" {
+		return strings.ToLower(baseName) + " (" + resource + ")"
+	}
+	return strings.ToLower(baseName)
 }
 
 // getClientDependencyName parses target hostname/identity from HTTP/gRPC client spans

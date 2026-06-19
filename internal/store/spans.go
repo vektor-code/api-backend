@@ -98,7 +98,11 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 			break
 		}
 		if keyLower == "messaging.system" && valLower != "" && valLower != "unknown" {
-			inferredSystem = valLower
+			if valLower == "message_bus" {
+				inferredSystem = "rabbitmq"
+			} else {
+				inferredSystem = valLower
+			}
 			isMsg = true
 			break
 		}
@@ -294,7 +298,7 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 				inferredSystem = "rabbitmq"
 				isMsg = true
 			} else {
-				inferredSystem = "message_bus"
+				inferredSystem = "rabbitmq"
 				isMsg = true
 			}
 		}
