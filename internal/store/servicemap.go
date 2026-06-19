@@ -6,12 +6,47 @@ import (
 	"github.com/kubetrace/api-backend/internal/models"
 )
 
-// GetServiceMap returns service dependency graph for a namespace
+// GetServiceMap returns a pre-built service dependency graph.
+// It returns immediately from cache when available; otherwise it builds,
+// stores in cache, and returns the result.
 func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) {
+	s.serviceMapMu.RLock()
+	cached, ok := s.serviceMapCache[namespace]
+	s.serviceMapMu.RUnlock()
+	if ok && cached != nil {
+		return cached, nil
+	}
+
+	// Cache miss — build now
+	result := s.buildServiceMap(namespace)
+
+	s.serviceMapMu.Lock()
+	s.serviceMapCache[namespace] = result
+	s.serviceMapMu.Unlock()
+
+	return result, nil
+}
+
+// InvalidateServiceMapCache clears all pre-computed maps.
+// Should be called whenever recentTraces or statsCache are updated (e.g. after syncState).
+func (s *Store) InvalidateServiceMapCache() {
+	s.serviceMapMu.Lock()
+	s.serviceMapCache = make(map[string]*models.ServiceMapData)
+	s.serviceMapMu.Unlock()
+}
+
+// buildServiceMap performs the full trace-scan computation.
+// Expensive — call sparingly (only on cache miss or after invalidation).
+func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
+	// Take both locks upfront and release at the end — this is safe because
+	// buildServiceMap never calls isMicroservice (which would re-acquire statsMu).
 	s.statsMu.RLock()
 	s.tracesMu.RLock()
 	defer s.statsMu.RUnlock()
 	defer s.tracesMu.RUnlock()
+
+	// Snapshot the statsCache keys once for O(1) microservice lookups
+	statsCacheSnapshot := s.statsCache
 
 	data := &models.ServiceMapData{Namespace: namespace}
 	edgeMap := make(map[string]*models.ServiceEdge)
@@ -31,9 +66,10 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 				continue
 			}
 		}
-		
-		spanMap := make(map[string]*models.Span)
-		parentSet := make(map[string]bool)
+
+		// Enrich spans ONCE and build lookup structures
+		spanMap := make(map[string]*models.Span, len(trace.Spans))
+		parentSet := make(map[string]bool, len(trace.Spans))
 		for _, sp := range trace.Spans {
 			s.enrichSpanMetadata(sp)
 			spanMap[sp.SpanID] = sp
@@ -43,8 +79,8 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		}
 
 		for _, sp := range trace.Spans {
-			s.enrichSpanMetadata(sp)
-			// Check for external database or messaging infrastructure calls, or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
+			// Check for external database or messaging infrastructure calls,
+			// or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
 			dbSystem, hasDb := sp.Attributes["db.system"]
 			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
 			isClient := sp.Kind == models.SpanKindClient || sp.Kind == "CLIENT"
@@ -64,10 +100,10 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 				}
 
 				if baseName != "" {
-					// Check if this represents a client call to a microservice rather than an infra node
-					if isClient && !hasDb && !hasMsg && s.isMicroservice(sp.Namespace, baseName) {
+					// Use the snapshot — no lock re-acquisition needed
+					if isClient && !hasDb && !hasMsg && isMicroserviceFromSnapshot(statsCacheSnapshot, sp.Namespace, baseName) {
 						if targetNamespace == "" {
-							targetNamespace = s.resolveServiceNamespace(sp.Namespace, baseName)
+							targetNamespace = resolveServiceNamespaceFromSnapshot(statsCacheSnapshot, sp.Namespace, baseName)
 						}
 						edgeKey := sp.Namespace + ":" + sp.ServiceName + "->" + targetNamespace + ":" + baseName
 						e, ok := edgeMap[edgeKey]
@@ -89,7 +125,7 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 					}
 
 					infraName := getInfraNodeName(sp, baseName)
-					
+
 					// Avoid self-loop rendering if client name matches service name
 					if infraName == sp.ServiceName {
 						continue
@@ -246,10 +282,45 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		data.Edges = append(data.Edges, *edge)
 	}
 
-	return data, nil
+	return data
 }
 
-// isMicroservice checks if a service name represents an instrumented service rather than infrastructure
+// isMicroserviceFromSnapshot checks if a service name represents an instrumented service
+// using a pre-captured statsCache snapshot (no lock needed).
+func isMicroserviceFromSnapshot(cache map[string]*models.ServiceStats, namespace, name string) bool {
+	nameLower := strings.ToLower(name)
+	if strings.HasSuffix(nameLower, "-backend") || strings.HasSuffix(nameLower, "-frontend") ||
+		nameLower == "ingress-nginx" || nameLower == "gateway" {
+		return true
+	}
+	if _, ok := cache[namespace+":"+name]; ok {
+		return true
+	}
+	for key := range cache {
+		if strings.HasSuffix(key, ":"+name) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveServiceNamespaceFromSnapshot finds the namespace of a service using
+// a pre-captured statsCache snapshot (no lock needed).
+func resolveServiceNamespaceFromSnapshot(cache map[string]*models.ServiceStats, defaultNamespace, serviceName string) string {
+	if _, ok := cache[defaultNamespace+":"+serviceName]; ok {
+		return defaultNamespace
+	}
+	for key := range cache {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) == 2 && parts[1] == serviceName {
+			return parts[0]
+		}
+	}
+	return defaultNamespace
+}
+
+// isMicroservice checks if a service name represents an instrumented service rather than infrastructure.
+// Kept for callers outside buildServiceMap that do not hold statsMu.
 func (s *Store) isMicroservice(namespace string, name string) bool {
 	nameLower := strings.ToLower(name)
 	if strings.HasSuffix(nameLower, "-backend") || strings.HasSuffix(nameLower, "-frontend") || nameLower == "ingress-nginx" || nameLower == "gateway" {

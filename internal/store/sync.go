@@ -186,8 +186,13 @@ func (s *Store) syncState() {
 		s.tracesMu.Lock()
 		s.recentTraces = newRecentTraces
 		s.tracesMu.Unlock()
+
+		// Invalidate pre-computed service maps so the next API call rebuilds them
+		// from the fresh statsCache + recentTraces data.
+		s.InvalidateServiceMapCache()
 	}
 }
+
 
 // runMinioGC periodically deletes traces from MinIO that are older than 12 hours
 func (s *Store) runMinioGC() {

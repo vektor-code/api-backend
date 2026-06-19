@@ -25,6 +25,11 @@ type Store struct {
 	recentTraces map[string]*models.Trace
 	tracesMu     sync.RWMutex
 
+	// Pre-computed service map cache (rebuilt on syncState, served directly on API calls)
+	serviceMapCache    map[string]*models.ServiceMapData // key = namespace ("" = all)
+	serviceMapMu       sync.RWMutex
+	serviceMapVersion  int64 // incremented when cache is invalidated
+
 	// Local caches (collected by this pod instance only)
 	localStats   map[string]*models.ServiceStats
 	localTraces  map[string]*models.Trace
@@ -54,12 +59,13 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 	}
 
 	s := &Store{
-		client:       client,
-		bucketName:   bucket,
-		statsCache:   make(map[string]*models.ServiceStats),
-		recentTraces: make(map[string]*models.Trace),
-		localStats:   make(map[string]*models.ServiceStats),
-		localTraces:  make(map[string]*models.Trace),
+		client:           client,
+		bucketName:       bucket,
+		statsCache:       make(map[string]*models.ServiceStats),
+		recentTraces:     make(map[string]*models.Trace),
+		serviceMapCache:  make(map[string]*models.ServiceMapData),
+		localStats:       make(map[string]*models.ServiceStats),
+		localTraces:      make(map[string]*models.Trace),
 	}
 
 	go s.runGC()
