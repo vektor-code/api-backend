@@ -77,8 +77,56 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 				continue
 			}
 		}
-		if q.ServiceName != "" && trace.ServiceName != q.ServiceName {
-			continue
+		if q.ServiceName != "" {
+			matched := false
+			targetSvc := strings.ToLower(q.ServiceName)
+			
+			// Parse system name if it contains details in parentheses, e.g. "postgresql (users_db)"
+			baseSys := targetSvc
+			dbName := ""
+			if idx := strings.Index(targetSvc, "("); idx != -1 {
+				baseSys = strings.TrimSpace(targetSvc[:idx])
+				if endIdx := strings.Index(targetSvc, ")"); endIdx != -1 && endIdx > idx {
+					dbName = strings.TrimSpace(targetSvc[idx+1 : endIdx])
+				}
+			}
+
+			for _, sp := range trace.Spans {
+				// Match span service name
+				if strings.ToLower(sp.ServiceName) == targetSvc {
+					matched = true
+					break
+				}
+				// Match database system and optionally db.name
+				if dbSys, ok := sp.Attributes["db.system"]; ok && strings.ToLower(dbSys) == baseSys {
+					if dbName == "" {
+						matched = true
+						break
+					}
+					// If dbName is specified, also verify db.name matches
+					if dbN, ok2 := sp.Attributes["db.name"]; ok2 && strings.ToLower(dbN) == dbName {
+						matched = true
+						break
+					}
+				}
+				// Match messaging system
+				if msgSys, ok := sp.Attributes["messaging.system"]; ok && strings.ToLower(msgSys) == baseSys {
+					matched = true
+					break
+				}
+				// Match 3rd party tool
+				if is3rd, tool := s.isThirdPartySpan(sp); is3rd && strings.ToLower(tool) == baseSys {
+					matched = true
+					break
+				}
+			}
+			// Fallback: match raw root service name
+			if !matched && strings.ToLower(trace.ServiceName) == targetSvc {
+				matched = true
+			}
+			if !matched {
+				continue
+			}
 		}
 		if q.HasError != nil && *q.HasError != trace.HasError {
 			continue
