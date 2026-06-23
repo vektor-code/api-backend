@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,15 @@ type Store struct {
 	localStats   map[string]*models.ServiceStats
 	localTraces  map[string]*models.Trace
 	localMu      sync.RWMutex
+
+	// Background upload queue to throttle MinIO writes and prevent CPU iowait
+	uploadChan   chan uploadTask
+}
+
+type uploadTask struct {
+	objectName  string
+	data        []byte
+	contentType string
 }
 
 // New creates a new MinIO store
@@ -66,6 +76,12 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		serviceMapCache:  make(map[string]*models.ServiceMapData),
 		localStats:       make(map[string]*models.ServiceStats),
 		localTraces:      make(map[string]*models.Trace),
+		uploadChan:       make(chan uploadTask, 5000),
+	}
+
+	// Start rate-limiting upload workers to throttle disk writes and lower CPU iowait
+	for i := 0; i < 3; i++ {
+		go s.uploadWorker()
 	}
 
 	go s.runGC()
@@ -115,4 +131,17 @@ type TracePodInfo struct {
 	ServiceName string            `json:"serviceName"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	LastSeen    time.Time         `json:"lastSeen"`
+}
+
+// uploadWorker processes background S3 uploads at a throttled rate
+func (s *Store) uploadWorker() {
+	for task := range s.uploadChan {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = s.client.PutObject(ctx, s.bucketName, task.objectName, bytes.NewReader(task.data), int64(len(task.data)), minio.PutObjectOptions{
+			ContentType: task.contentType,
+		})
+		cancel()
+		// Sleep 15ms per object write to avoid local disk I/O bottlenecks and high CPU iowait
+		time.Sleep(15 * time.Millisecond)
+	}
 }

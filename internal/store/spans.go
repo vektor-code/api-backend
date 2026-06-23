@@ -1,15 +1,12 @@
 package store
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
-	"github.com/minio/minio-go/v7"
 )
 
 // SaveSpan writes a span to MinIO
@@ -24,14 +21,17 @@ func (s *Store) SaveSpan(span *models.Span) error {
 	// S3 path: traces/namespace/service/traceID/spanID.json
 	objectName := fmt.Sprintf("traces/%s/%s/%s/%s.json", span.Namespace, span.ServiceName, span.TraceID, span.SpanID)
 	
-	// Fire and forget upload to avoid blocking the ingestion path
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = s.client.PutObject(ctx, s.bucketName, objectName, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
-			ContentType: "application/json",
-		})
-	}()
+	// Queue the upload task with drop-on-overflow logic to protect S3/MinIO disk I/O and prevent CPU iowait
+	task := uploadTask{
+		objectName:  objectName,
+		data:        data,
+		contentType: "application/json",
+	}
+	select {
+	case s.uploadChan <- task:
+	default:
+		// Queue is full; discard S3 upload to protect system stability
+	}
 
 	s.updateLocalStats(span)
 	s.updateLocalRecentTraces(span)
@@ -43,9 +43,13 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	if span == nil {
 		return
 	}
+	if span.Attributes != nil && span.Attributes["__vektor_enriched__"] == "true" {
+		return
+	}
 	if span.Attributes == nil {
 		span.Attributes = make(map[string]string)
 	}
+	span.Attributes["__vektor_enriched__"] = "true"
 
 	// Try to resolve/extract database name if missing or generic
 	if dbName := parseDbNameFromAttributes(span); dbName != "" {
