@@ -38,11 +38,15 @@ func (s *Store) runGC() {
 func (s *Store) runSync() {
 	// Sync immediately on startup
 	s.syncState()
+	_ = s.LoadDisabledNamespaces()
+	_ = s.LoadConfiguredNamespaces()
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.syncState()
+		_ = s.LoadDisabledNamespaces()
+		_ = s.LoadConfiguredNamespaces()
 	}
 }
 
