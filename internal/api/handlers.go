@@ -785,8 +785,8 @@ func (h *Handler) GetNamespaceStatuses(c *fiber.Ctx) error {
 		disabledMap[ns] = true
 	}
 
-	var enabled []string
-	var disabled []string
+	enabled := []string{}
+	disabled := []string{}
 	for ns := range nsMap {
 		if disabledMap[ns] {
 			disabled = append(disabled, ns)
