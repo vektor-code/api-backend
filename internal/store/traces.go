@@ -65,6 +65,18 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 
 	var items []*models.TraceListItem
 	for _, trace := range s.recentTraces {
+		if q.Cluster != "" {
+			hasCluster := false
+			for _, sp := range trace.Spans {
+				if sp.Cluster == q.Cluster {
+					hasCluster = true
+					break
+				}
+			}
+			if !hasCluster {
+				continue
+			}
+		}
 		if q.Namespace != "" {
 			hasNs := false
 			for _, sp := range trace.Spans {
@@ -226,6 +238,7 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 			TraceID:         trace.TraceID,
 			ServiceName:     trace.ServiceName,
 			Namespace:       trace.Namespace,
+			Cluster:         trace.Cluster,
 			StartTime:       trace.StartTime,
 			DurationMs:      trace.DurationMs,
 			SpanCount:       trace.SpanCount,

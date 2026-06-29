@@ -22,6 +22,7 @@ type LDAPUser struct {
 	DN          string
 	DisplayName string
 	Email       string
+	IsAdmin     bool
 }
 
 func getJWTSecret() []byte {
@@ -46,6 +47,7 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 
 	var displayName string
 	var email string
+	role := "user"
 
 	if req.Mode == "ldap" {
 		if os.Getenv("LDAP_ENABLED") == "false" {
@@ -61,6 +63,9 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 			displayName = req.Username
 		}
 		email = user.Email
+		if user.IsAdmin {
+			role = "admin"
+		}
 	} else {
 		// Local Admin auth
 		adminUser := os.Getenv("ADMIN_USERNAME")
@@ -77,6 +82,7 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 		}
 		displayName = "Local Administrator"
 		email = "admin@kubetrace.local"
+		role = "admin"
 	}
 
 	// Issue JWT token
@@ -84,7 +90,7 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 		"sub":   req.Username,
 		"name":  displayName,
 		"email": email,
-		"role":  "admin",
+		"role":  role,
 		"exp":   time.Now().Add(24 * time.Hour).Unix(),
 	})
 
@@ -99,7 +105,7 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 			"username":    req.Username,
 			"displayName": displayName,
 			"email":       email,
-			"role":        "admin",
+			"role":        role,
 		},
 	})
 }
@@ -190,7 +196,7 @@ func loginLDAP(username, password string) (*LDAPUser, error) {
 		userBaseDN,
 		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		userFilter,
-		[]string{"dn", nameAttr, emailAttr},
+		[]string{"dn", nameAttr, emailAttr, "memberOf"},
 		nil,
 	)
 
@@ -207,6 +213,21 @@ func loginLDAP(username, password string) (*LDAPUser, error) {
 	displayName := sr.Entries[0].GetAttributeValue(nameAttr)
 	email := sr.Entries[0].GetAttributeValue(emailAttr)
 
+	// Fetch groups to authorize CN=TRACE_ADM membership
+	groups := sr.Entries[0].GetAttributeValues("memberOf")
+	isAdmin := false
+	for _, g := range groups {
+		gLower := strings.ToLower(g)
+		if strings.Contains(gLower, "cn=trace_adm") || strings.Contains(gLower, "trace_adm") {
+			isAdmin = true
+			break
+		}
+	}
+	// Fallback check: username CN matches trace_adm
+	if strings.ToLower(username) == "trace_adm" {
+		isAdmin = true
+	}
+
 	// 4. Bind as the User to authenticate password
 	err = l.Bind(userDN, password)
 	if err != nil {
@@ -217,5 +238,6 @@ func loginLDAP(username, password string) (*LDAPUser, error) {
 		DN:          userDN,
 		DisplayName: displayName,
 		Email:       email,
+		IsAdmin:     isAdmin,
 	}, nil
 }

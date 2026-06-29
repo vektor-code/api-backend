@@ -60,6 +60,7 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 		// Extract service name and namespace from resource attributes
 		serviceName := "unknown"
 		namespace := "default"
+		clusterName := "default"
 		podName := ""
 		nodeName := ""
 
@@ -69,6 +70,8 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 				serviceName = stringVal(attr.Value)
 			case "k8s.namespace.name":
 				namespace = stringVal(attr.Value)
+			case "k8s.cluster.name":
+				clusterName = stringVal(attr.Value)
 			case "k8s.pod.name":
 				podName = stringVal(attr.Value)
 			case "k8s.node.name":
@@ -76,9 +79,13 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 			}
 		}
 
+		if r.store.IsNamespaceDisabled(namespace) {
+			continue
+		}
+
 		for _, ss := range rs.ScopeSpans {
 			for _, sp := range ss.Spans {
-				span := convertSpan(sp, serviceName, namespace, podName, nodeName)
+				span := convertSpan(sp, serviceName, namespace, clusterName, podName, nodeName)
 				isError := span.Status == models.SpanStatusError
 				if r.sampler != nil && !r.sampler.ShouldSample(span.TraceID, isError) {
 					continue
@@ -95,7 +102,7 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 	}
 }
 
-func convertSpan(pb *tracepb.Span, svc, ns, pod, node string) *models.Span {
+func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.Span {
 	startTime := time.Unix(0, int64(pb.StartTimeUnixNano))
 	endTime := time.Unix(0, int64(pb.EndTimeUnixNano))
 	durationMs := float64(pb.EndTimeUnixNano-pb.StartTimeUnixNano) / 1e6
@@ -152,6 +159,7 @@ func convertSpan(pb *tracepb.Span, svc, ns, pod, node string) *models.Span {
 		Name:         pb.Name,
 		ServiceName:  svc,
 		Namespace:    ns,
+		Cluster:      cluster,
 		PodName:      pod,
 		NodeName:     node,
 		StartTime:    startTime,

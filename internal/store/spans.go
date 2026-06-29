@@ -35,6 +35,12 @@ func (s *Store) SaveSpan(span *models.Span) error {
 
 	s.updateLocalStats(span)
 	s.updateLocalRecentTraces(span)
+
+	if span.Cluster != "" {
+		s.clustersMu.Lock()
+		s.detectedClusters[span.Cluster] = true
+		s.clustersMu.Unlock()
+	}
 	return nil
 }
 
@@ -480,6 +486,7 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 	var rootSpan *models.Span
 	var minStart, maxEnd time.Time
 	hasError := false
+	cluster := ""
 
 	for _, sp := range spans {
 		if sp.ParentSpanID == "" {
@@ -494,6 +501,9 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 		if sp.Status == models.SpanStatusError {
 			hasError = true
 		}
+		if sp.Cluster != "" {
+			cluster = sp.Cluster
+		}
 	}
 
 	trace.RootSpan = rootSpan
@@ -501,6 +511,7 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 	trace.EndTime = maxEnd
 	trace.HasError = hasError
 	trace.DurationMs = float64(maxEnd.Sub(minStart).Microseconds()) / 1000.0
+	trace.Cluster = cluster
 
 	if rootSpan != nil {
 		trace.Namespace = rootSpan.Namespace

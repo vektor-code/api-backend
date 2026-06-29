@@ -38,6 +38,12 @@ type Store struct {
 
 	// Background upload queue to throttle MinIO writes and prevent CPU iowait
 	uploadChan   chan uploadTask
+
+	detectedClusters map[string]bool
+	clustersMu       sync.RWMutex
+
+	disabledNamespaces map[string]bool
+	disabledNamespacesMu sync.RWMutex
 }
 
 type uploadTask struct {
@@ -74,10 +80,14 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		statsCache:       make(map[string]*models.ServiceStats),
 		recentTraces:     make(map[string]*models.Trace),
 		serviceMapCache:  make(map[string]*models.ServiceMapData),
-		localStats:       make(map[string]*models.ServiceStats),
-		localTraces:      make(map[string]*models.Trace),
-		uploadChan:       make(chan uploadTask, 5000),
+		localStats:         make(map[string]*models.ServiceStats),
+		localTraces:        make(map[string]*models.Trace),
+		uploadChan:         make(chan uploadTask, 5000),
+		detectedClusters:   make(map[string]bool),
+		disabledNamespaces: make(map[string]bool),
 	}
+
+	_ = s.LoadDisabledNamespaces()
 
 	// Start rate-limiting upload workers to throttle disk writes and lower CPU iowait
 	for i := 0; i < 3; i++ {
@@ -145,3 +155,99 @@ func (s *Store) uploadWorker() {
 		time.Sleep(15 * time.Millisecond)
 	}
 }
+
+func (s *Store) LoadDisabledNamespaces() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	obj, err := s.client.GetObject(ctx, s.bucketName, "config/disabled_namespaces.json", minio.GetObjectOptions{})
+	if err != nil {
+		s.disabledNamespacesMu.Lock()
+		s.disabledNamespaces = make(map[string]bool)
+		s.disabledNamespacesMu.Unlock()
+		return nil
+	}
+	defer obj.Close()
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return err
+	}
+
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+
+	s.disabledNamespacesMu.Lock()
+	s.disabledNamespaces = make(map[string]bool)
+	for _, ns := range list {
+		s.disabledNamespaces[ns] = true
+	}
+	s.disabledNamespacesMu.Unlock()
+	return nil
+}
+
+func (s *Store) SaveDisabledNamespaces() error {
+	s.disabledNamespacesMu.RLock()
+	list := make([]string, 0, len(s.disabledNamespaces))
+	for ns, disabled := range s.disabledNamespaces {
+		if disabled {
+			list = append(list, ns)
+		}
+	}
+	s.disabledNamespacesMu.RUnlock()
+
+	data, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = s.client.PutObject(ctx, s.bucketName, "config/disabled_namespaces.json", bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+		ContentType: "application/json",
+	})
+	return err
+}
+
+func (s *Store) IsNamespaceDisabled(ns string) bool {
+	s.disabledNamespacesMu.RLock()
+	defer s.disabledNamespacesMu.RUnlock()
+	return s.disabledNamespaces[ns]
+}
+
+func (s *Store) ToggleNamespace(ns string, disabled bool) error {
+	s.disabledNamespacesMu.Lock()
+	if s.disabledNamespaces == nil {
+		s.disabledNamespaces = make(map[string]bool)
+	}
+	s.disabledNamespaces[ns] = disabled
+	s.disabledNamespacesMu.Unlock()
+	return s.SaveDisabledNamespaces()
+}
+
+func (s *Store) GetDisabledNamespaces() []string {
+	s.disabledNamespacesMu.RLock()
+	defer s.disabledNamespacesMu.RUnlock()
+	list := make([]string, 0, len(s.disabledNamespaces))
+	for ns, disabled := range s.disabledNamespaces {
+		if disabled {
+			list = append(list, ns)
+		}
+	}
+	return list
+}
+
+func (s *Store) GetClusters() []string {
+	s.clustersMu.RLock()
+	defer s.clustersMu.RUnlock()
+	clusters := make([]string, 0, len(s.detectedClusters))
+	for c := range s.detectedClusters {
+		clusters = append(clusters, c)
+	}
+	if len(clusters) == 0 {
+		clusters = append(clusters, "default")
+	}
+	return clusters
+}
+

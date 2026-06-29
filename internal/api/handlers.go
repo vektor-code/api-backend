@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/models"
 	"github.com/kubetrace/api-backend/internal/store"
@@ -133,6 +135,7 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 func (h *Handler) ListTraces(c *fiber.Ctx) error {
 	q := &models.SearchQuery{
 		Namespace:   c.Query("namespace"),
+		Cluster:     c.Query("cluster"),
 		ServiceName: c.Query("service"),
 		Limit:       c.QueryInt("limit", 50),
 		Offset:      c.QueryInt("offset", 0),
@@ -673,4 +676,170 @@ func inferDbSystemFromContext(query string, span *models.Span) string {
 	}
 
 	return "unknown"
+}
+
+// GET /api/clusters
+func (h *Handler) GetClusters(c *fiber.Ctx) error {
+	clusters := h.store.GetClusters()
+	return c.JSON(fiber.Map{
+		"clusters": clusters,
+	})
+}
+
+// GET /api/admin/config
+func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
+	// Verify user is admin
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	// Read environment variables
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	kafkaTopic := os.Getenv("KAFKA_TOPIC")
+	kafkaGroup := os.Getenv("KAFKA_GROUP")
+
+	clickhouseURL := os.Getenv("CLICKHOUSE_URL")
+
+	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
+	minioUseSSL := os.Getenv("MINIO_USE_SSL")
+	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
+	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
+	minioBucket := os.Getenv("MINIO_BUCKET")
+
+	ldapEnabled := os.Getenv("LDAP_ENABLED")
+	ldapURL := os.Getenv("LDAP_URL")
+	ldapBindDN := os.Getenv("LDAP_BIND_DN")
+	ldapBindPassword := os.Getenv("LDAP_BIND_PASSWORD")
+	ldapUserBaseDN := os.Getenv("LDAP_USER_BASE_DN")
+	ldapUserFilter := os.Getenv("LDAP_USER_FILTER")
+
+	return c.JSON(fiber.Map{
+		"kafka": fiber.Map{
+			"brokers": kafkaBrokers,
+			"topic":   kafkaTopic,
+			"group":   kafkaGroup,
+		},
+		"clickhouse": fiber.Map{
+			"url": clickhouseURL,
+		},
+		"minio": fiber.Map{
+			"endpoint":  minioEndpoint,
+			"useSSL":    minioUseSSL,
+			"accessKey": minioAccessKey,
+			"secretKey": maskSecret(minioSecretKey),
+			"bucket":    minioBucket,
+		},
+		"ldap": fiber.Map{
+			"enabled":      ldapEnabled,
+			"url":          ldapURL,
+			"bindDN":       ldapBindDN,
+			"bindPassword": maskSecret(ldapBindPassword),
+			"userBaseDN":   ldapUserBaseDN,
+			"userFilter":   ldapUserFilter,
+		},
+		"system": fiber.Map{
+			"k8sConnected": h.k8s != nil,
+			"demoMode":     os.Getenv("KUBETRACE_DEMO"),
+			"timezone":     os.Getenv("TZ"),
+		},
+	})
+}
+
+// GET /api/admin/namespaces
+func (h *Handler) GetNamespaceStatuses(c *fiber.Ctx) error {
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	// 1. Gather all unique namespaces from stats & k8s
+	nsMap := make(map[string]bool)
+	if h.k8s != nil {
+		for _, ns := range h.k8s.GetNamespaces() {
+			nsMap[ns] = true
+		}
+	}
+	stats, err := h.store.GetNamespaceStats()
+	if err == nil {
+		for _, stat := range stats {
+			if stat.Namespace != "" && stat.Namespace != "Internet" {
+				nsMap[stat.Namespace] = true
+			}
+		}
+	}
+	if len(nsMap) == 0 {
+		nsMap["default"] = true
+	}
+
+	// 2. Fetch disabled list from store
+	disabledList := h.store.GetDisabledNamespaces()
+	disabledMap := make(map[string]bool)
+	for _, ns := range disabledList {
+		disabledMap[ns] = true
+	}
+
+	var enabled []string
+	var disabled []string
+	for ns := range nsMap {
+		if disabledMap[ns] {
+			disabled = append(disabled, ns)
+		} else {
+			enabled = append(enabled, ns)
+		}
+	}
+	sort.Strings(enabled)
+	sort.Strings(disabled)
+
+	return c.JSON(fiber.Map{
+		"enabled":  enabled,
+		"disabled": disabled,
+	})
+}
+
+// POST /api/admin/namespaces/toggle
+func (h *Handler) ToggleNamespace(c *fiber.Ctx) error {
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	var req struct {
+		Namespace string `json:"namespace"`
+		Disabled  bool   `json:"disabled"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if req.Namespace == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Namespace is required"})
+	}
+
+	err := h.store.ToggleNamespace(req.Namespace, req.Disabled)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+	})
+}
+
+func maskSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 4 {
+		return "****"
+	}
+	return secret[:2] + "****" + secret[len(secret)-2:]
 }

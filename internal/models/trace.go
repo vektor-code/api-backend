@@ -10,6 +10,7 @@ type Span struct {
 	Name         string            `json:"name"`
 	ServiceName  string            `json:"serviceName"`
 	Namespace    string            `json:"namespace"`
+	Cluster      string            `json:"cluster,omitempty"`
 	PodName      string            `json:"podName,omitempty"`
 	NodeName     string            `json:"nodeName,omitempty"`
 	StartTime    time.Time         `json:"startTime"`
@@ -53,6 +54,7 @@ type Trace struct {
 	RootSpan    *Span     `json:"rootSpan"`
 	Spans       []*Span   `json:"spans"`
 	Namespace   string    `json:"namespace"`
+	Cluster     string    `json:"cluster,omitempty"`
 	ServiceName string    `json:"serviceName"`
 	StartTime   time.Time `json:"startTime"`
 	EndTime     time.Time `json:"endTime"`
@@ -66,6 +68,7 @@ type TraceListItem struct {
 	TraceID         string    `json:"traceId"`
 	ServiceName     string    `json:"serviceName"`
 	Namespace       string    `json:"namespace"`
+	Cluster         string    `json:"cluster,omitempty"`
 	RootName        string    `json:"rootName"`
 	StartTime       time.Time `json:"startTime"`
 	DurationMs      float64   `json:"durationMs"`
@@ -124,6 +127,7 @@ type ServiceMapData struct {
 // SearchQuery represents trace search parameters
 type SearchQuery struct {
 	Namespace     string    `json:"namespace"`
+	Cluster       string    `json:"cluster"`
 	ServiceName   string    `json:"serviceName"`
 	Operation     string    `json:"operation"`
 	TraceID       string    `json:"traceId"`
