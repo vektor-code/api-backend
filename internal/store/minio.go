@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +48,9 @@ type Store struct {
 
 	configuredNamespaces map[string]bool
 	configuredNamespacesMu sync.RWMutex
+
+	db              *sql.DB
+	postgresEnabled bool
 }
 
 type uploadTask struct {
@@ -107,7 +111,10 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 
 // Close shuts down the store
 func (s *Store) Close() error {
-	return nil // MinIO client doesn't need explicit close
+	if s.postgresEnabled && s.db != nil {
+		return s.db.Close()
+	}
+	return nil
 }
 
 // getSpanObject retrieves a raw JSON span from MinIO and unmarshals it
@@ -216,12 +223,30 @@ func (s *Store) SaveDisabledNamespaces() error {
 }
 
 func (s *Store) IsNamespaceDisabled(ns string) bool {
+	if s.postgresEnabled {
+		var disabled bool
+		err := s.db.QueryRow("SELECT disabled FROM disabled_namespaces WHERE namespace = $1", ns).Scan(&disabled)
+		if err != nil {
+			return false // not found = active
+		}
+		return disabled
+	}
+
 	s.disabledNamespacesMu.RLock()
 	defer s.disabledNamespacesMu.RUnlock()
 	return s.disabledNamespaces[ns]
 }
 
 func (s *Store) ToggleNamespace(ns string, disabled bool) error {
+	if s.postgresEnabled {
+		_, err := s.db.Exec(`
+			INSERT INTO disabled_namespaces (namespace, disabled, updated_at)
+			VALUES ($1, $2, CURRENT_TIMESTAMP)
+			ON CONFLICT (namespace) DO UPDATE SET disabled = $2, updated_at = CURRENT_TIMESTAMP
+		`, ns, disabled)
+		return err
+	}
+
 	s.disabledNamespacesMu.Lock()
 	if s.disabledNamespaces == nil {
 		s.disabledNamespaces = make(map[string]bool)
@@ -232,6 +257,23 @@ func (s *Store) ToggleNamespace(ns string, disabled bool) error {
 }
 
 func (s *Store) GetDisabledNamespaces() []string {
+	if s.postgresEnabled {
+		rows, err := s.db.Query("SELECT namespace FROM disabled_namespaces WHERE disabled = true")
+		if err != nil {
+			return []string{}
+		}
+		defer rows.Close()
+
+		var list []string
+		for rows.Next() {
+			var ns string
+			if err := rows.Scan(&ns); err == nil {
+				list = append(list, ns)
+			}
+		}
+		return list
+	}
+
 	s.disabledNamespacesMu.RLock()
 	defer s.disabledNamespacesMu.RUnlock()
 	list := make([]string, 0, len(s.disabledNamespaces))
@@ -309,6 +351,15 @@ func (s *Store) SaveConfiguredNamespaces() error {
 }
 
 func (s *Store) AddConfiguredNamespace(ns string) error {
+	if s.postgresEnabled {
+		_, err := s.db.Exec(`
+			INSERT INTO configured_namespaces (namespace, configured, updated_at)
+			VALUES ($1, true, CURRENT_TIMESTAMP)
+			ON CONFLICT (namespace) DO NOTHING
+		`, ns)
+		return err
+	}
+
 	s.configuredNamespacesMu.Lock()
 	if s.configuredNamespaces == nil {
 		s.configuredNamespaces = make(map[string]bool)
@@ -319,6 +370,15 @@ func (s *Store) AddConfiguredNamespace(ns string) error {
 }
 
 func (s *Store) DeleteConfiguredNamespace(ns string) error {
+	if s.postgresEnabled {
+		_, err := s.db.Exec("DELETE FROM configured_namespaces WHERE namespace = $1", ns)
+		if err != nil {
+			return err
+		}
+		_, _ = s.db.Exec("DELETE FROM disabled_namespaces WHERE namespace = $1", ns)
+		return nil
+	}
+
 	s.configuredNamespacesMu.Lock()
 	delete(s.configuredNamespaces, ns)
 	s.configuredNamespacesMu.Unlock()
@@ -333,6 +393,23 @@ func (s *Store) DeleteConfiguredNamespace(ns string) error {
 }
 
 func (s *Store) GetConfiguredNamespaces() []string {
+	if s.postgresEnabled {
+		rows, err := s.db.Query("SELECT namespace FROM configured_namespaces")
+		if err != nil {
+			return []string{}
+		}
+		defer rows.Close()
+
+		var list []string
+		for rows.Next() {
+			var ns string
+			if err := rows.Scan(&ns); err == nil {
+				list = append(list, ns)
+			}
+		}
+		return list
+	}
+
 	s.configuredNamespacesMu.RLock()
 	defer s.configuredNamespacesMu.RUnlock()
 	list := make([]string, 0, len(s.configuredNamespaces))

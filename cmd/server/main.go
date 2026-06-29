@@ -29,6 +29,12 @@ func main() {
 		demoMode      = flag.Bool("demo", getEnvBool("KUBETRACE_DEMO", true), "Enable demo data generation")
 		demoIntervalS = flag.Int("demo-interval", getEnvInt("KUBETRACE_DEMO_INTERVAL", 3), "Demo trace interval seconds")
 		samplingLimit = flag.Int64("sampling-limit", int64(getEnvInt("KUBETRACE_SAMPLING_LIMIT", 1000)), "Target spans per second for adaptive sampling (0 to disable)")
+		postgresHost     = flag.String("postgres-host", getEnv("POSTGRES_HOST", ""), "PostgreSQL Host")
+		postgresPort     = flag.Int("postgres-port", getEnvInt("POSTGRES_PORT", 5432), "PostgreSQL Port")
+		postgresDB       = flag.String("postgres-db", getEnv("POSTGRES_DB", "kubetrace"), "PostgreSQL Database Name")
+		postgresUser     = flag.String("postgres-user", getEnv("POSTGRES_USER", "trace"), "PostgreSQL User")
+		postgresPassword = flag.String("postgres-password", getEnv("POSTGRES_PASSWORD", ""), "PostgreSQL Password")
+		postgresSSL      = flag.String("postgres-ssl", getEnv("POSTGRES_SSL", "disable"), "PostgreSQL SSL Mode")
 	)
 	flag.Parse()
 
@@ -41,6 +47,17 @@ func main() {
 		log.Fatalf("init store: %v", err)
 	}
 	defer traceStore.Close()
+
+	if *postgresHost != "" {
+		connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			*postgresHost, *postgresPort, *postgresUser, *postgresPassword, *postgresDB, *postgresSSL)
+		log.Printf("Connecting to Postgres at %s:%d (db: %s)", *postgresHost, *postgresPort, *postgresDB)
+		if err := traceStore.InitPostgres(connStr); err != nil {
+			log.Printf("[warn] PostgreSQL initialization failed: %v. Falling back to MinIO config backend.", err)
+		}
+	} else {
+		log.Println("PostgreSQL host not configured. Running config store with MinIO only.")
+	}
 
 	var watcher *k8s.Watcher
 	watcher, err = k8s.NewWatcher(*kubeconfig)
