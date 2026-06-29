@@ -44,6 +44,9 @@ type Store struct {
 
 	disabledNamespaces map[string]bool
 	disabledNamespacesMu sync.RWMutex
+
+	configuredNamespaces map[string]bool
+	configuredNamespacesMu sync.RWMutex
 }
 
 type uploadTask struct {
@@ -85,9 +88,11 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		uploadChan:         make(chan uploadTask, 5000),
 		detectedClusters:   make(map[string]bool),
 		disabledNamespaces: make(map[string]bool),
+		configuredNamespaces: make(map[string]bool),
 	}
 
 	_ = s.LoadDisabledNamespaces()
+	_ = s.LoadConfiguredNamespaces()
 
 	// Start rate-limiting upload workers to throttle disk writes and lower CPU iowait
 	for i := 0; i < 3; i++ {
@@ -249,5 +254,91 @@ func (s *Store) GetClusters() []string {
 		clusters = append(clusters, "default")
 	}
 	return clusters
+}
+
+func (s *Store) LoadConfiguredNamespaces() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	obj, err := s.client.GetObject(ctx, s.bucketName, "config/namespaces_list.json", minio.GetObjectOptions{})
+	if err != nil {
+		s.configuredNamespacesMu.Lock()
+		s.configuredNamespaces = make(map[string]bool)
+		s.configuredNamespacesMu.Unlock()
+		return nil
+	}
+	defer obj.Close()
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return err
+	}
+
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+
+	s.configuredNamespacesMu.Lock()
+	s.configuredNamespaces = make(map[string]bool)
+	for _, ns := range list {
+		s.configuredNamespaces[ns] = true
+	}
+	s.configuredNamespacesMu.Unlock()
+	return nil
+}
+
+func (s *Store) SaveConfiguredNamespaces() error {
+	s.configuredNamespacesMu.RLock()
+	list := make([]string, 0, len(s.configuredNamespaces))
+	for ns := range s.configuredNamespaces {
+		list = append(list, ns)
+	}
+	s.configuredNamespacesMu.RUnlock()
+
+	data, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = s.client.PutObject(ctx, s.bucketName, "config/namespaces_list.json", bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+		ContentType: "application/json",
+	})
+	return err
+}
+
+func (s *Store) AddConfiguredNamespace(ns string) error {
+	s.configuredNamespacesMu.Lock()
+	if s.configuredNamespaces == nil {
+		s.configuredNamespaces = make(map[string]bool)
+	}
+	s.configuredNamespaces[ns] = true
+	s.configuredNamespacesMu.Unlock()
+	return s.SaveConfiguredNamespaces()
+}
+
+func (s *Store) DeleteConfiguredNamespace(ns string) error {
+	s.configuredNamespacesMu.Lock()
+	delete(s.configuredNamespaces, ns)
+	s.configuredNamespacesMu.Unlock()
+	
+	// Also remove it from disabled list to clean up
+	s.disabledNamespacesMu.Lock()
+	delete(s.disabledNamespaces, ns)
+	s.disabledNamespacesMu.Unlock()
+	_ = s.SaveDisabledNamespaces()
+
+	return s.SaveConfiguredNamespaces()
+}
+
+func (s *Store) GetConfiguredNamespaces() []string {
+	s.configuredNamespacesMu.RLock()
+	defer s.configuredNamespacesMu.RUnlock()
+	list := make([]string, 0, len(s.configuredNamespaces))
+	for ns := range s.configuredNamespaces {
+		list = append(list, ns)
+	}
+	return list
 }
 

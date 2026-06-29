@@ -53,6 +53,8 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/admin/config", h.GetAdminConfig)
 	api.Get("/admin/namespaces", h.GetNamespaceStatuses)
 	api.Post("/admin/namespaces/toggle", h.ToggleNamespace)
+	api.Post("/admin/namespaces/add", h.AddNamespace)
+	api.Post("/admin/namespaces/delete", h.DeleteNamespace)
 
 	// WebSocket (WebSocket connections bypass middleware and authenticate using standard query tokens or handshake if needed, but we keep websocket endpoint unauthenticated for live-stream connections or let it pass through)
 	app.Use("/ws", func(c *fiber.Ctx) error {

@@ -759,7 +759,7 @@ func (h *Handler) GetNamespaceStatuses(c *fiber.Ctx) error {
 		}
 	}
 
-	// 1. Gather all unique namespaces from stats & k8s
+	// 1. Gather all unique namespaces from stats & k8s & configured list
 	nsMap := make(map[string]bool)
 	if h.k8s != nil {
 		for _, ns := range h.k8s.GetNamespaces() {
@@ -773,6 +773,9 @@ func (h *Handler) GetNamespaceStatuses(c *fiber.Ctx) error {
 				nsMap[stat.Namespace] = true
 			}
 		}
+	}
+	for _, ns := range h.store.GetConfiguredNamespaces() {
+		nsMap[ns] = true
 	}
 	if len(nsMap) == 0 {
 		nsMap["default"] = true
@@ -825,6 +828,66 @@ func (h *Handler) ToggleNamespace(c *fiber.Ctx) error {
 	}
 
 	err := h.store.ToggleNamespace(req.Namespace, req.Disabled)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+	})
+}
+
+// POST /api/admin/namespaces/add
+func (h *Handler) AddNamespace(c *fiber.Ctx) error {
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	var req struct {
+		Namespace string `json:"namespace"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if req.Namespace == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Namespace is required"})
+	}
+
+	err := h.store.AddConfiguredNamespace(req.Namespace)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+	})
+}
+
+// POST /api/admin/namespaces/delete
+func (h *Handler) DeleteNamespace(c *fiber.Ctx) error {
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	var req struct {
+		Namespace string `json:"namespace"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if req.Namespace == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Namespace is required"})
+	}
+
+	err := h.store.DeleteConfiguredNamespace(req.Namespace)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
