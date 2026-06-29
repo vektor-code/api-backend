@@ -119,7 +119,15 @@ func (h *Handler) GetNamespaces(c *fiber.Ctx) error {
 		sort.Strings(ns)
 	}
 
-	return c.JSON(fiber.Map{"namespaces": ns})
+	// Filter out disabled namespaces
+	filteredNs := []string{}
+	for _, name := range ns {
+		if !h.store.IsNamespaceDisabled(name) {
+			filteredNs = append(filteredNs, name)
+		}
+	}
+
+	return c.JSON(fiber.Map{"namespaces": filteredNs})
 }
 
 // GET /api/stats
@@ -128,7 +136,13 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"namespaces": stats})
+	filteredStats := []*models.NamespaceStats{}
+	for _, nsStat := range stats {
+		if !h.store.IsNamespaceDisabled(nsStat.Namespace) {
+			filteredStats = append(filteredStats, nsStat)
+		}
+	}
+	return c.JSON(fiber.Map{"namespaces": filteredStats})
 }
 
 // GET /api/traces?namespace=&service=&hasError=&limit=&offset=
