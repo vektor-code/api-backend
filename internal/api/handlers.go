@@ -92,7 +92,7 @@ func (h *Handler) Health(c *fiber.Ctx) error {
 func (h *Handler) GetNamespaces(c *fiber.Ctx) error {
 	var ns []string
 	if h.k8s != nil {
-		ns = h.k8s.GetNamespaces()
+		ns = h.k8s.GetAgentNamespaces()
 	}
 
 	// Fallback: if Kubernetes watcher is nil or returned no namespaces,
@@ -776,7 +776,7 @@ func (h *Handler) GetNamespaceStatuses(c *fiber.Ctx) error {
 	// 1. Gather all unique namespaces from stats & k8s & configured list
 	nsMap := make(map[string]bool)
 	if h.k8s != nil {
-		for _, ns := range h.k8s.GetNamespaces() {
+		for _, ns := range h.k8s.GetAgentNamespaces() {
 			nsMap[ns] = true
 		}
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -91,6 +93,31 @@ func (w *Watcher) GetNamespaces() []string {
 	defer w.mu.RUnlock()
 	result := make([]string, len(w.namespaces))
 	copy(result, w.namespaces)
+	return result
+}
+
+// GetAgentNamespaces returns namespaces where the agent-backend pod is running
+func (w *Watcher) GetAgentNamespaces() []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	nsMap := make(map[string]bool)
+	for _, pod := range w.pods {
+		isAgent := strings.HasPrefix(pod.Name, "agent-backend") ||
+			pod.Labels["app.kubernetes.io/name"] == "agent-backend" ||
+			pod.Labels["app"] == "agent-backend" ||
+			pod.Labels["app"] == "kubetrace-agent"
+
+		if isAgent && pod.Phase == "Running" {
+			nsMap[pod.Namespace] = true
+		}
+	}
+
+	var result []string
+	for ns := range nsMap {
+		result = append(result, ns)
+	}
+	sort.Strings(result)
 	return result
 }
 
