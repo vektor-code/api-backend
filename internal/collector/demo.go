@@ -109,6 +109,7 @@ func (d *DemoGenerator) generateTrace() {
 		Attributes: map[string]string{
 			"http.method": operation[:3],
 			"http.url":    operation[4:],
+			"telemetry.sdk.language": getServiceLanguage(rootSvc),
 		},
 	}
 
@@ -149,7 +150,10 @@ func (d *DemoGenerator) generateTrace() {
 			DurationMs:   childDuration,
 			Status:       models.SpanStatusOK,
 			Kind:         models.SpanKindServer,
-			Attributes:   map[string]string{"component": svc},
+			Attributes: map[string]string{
+				"component":              svc,
+				"telemetry.sdk.language": getServiceLanguage(svc),
+			},
 		}
 
 		if isError && i == numChildren-1 {
@@ -212,4 +216,24 @@ func randomDBOp() string {
 		"DELETE FROM sessions WHERE expires_at < NOW()",
 	}
 	return ops[rand.Intn(len(ops))]
+}
+
+func getServiceLanguage(svc string) string {
+	s := strings.ToLower(svc)
+	if strings.Contains(s, "frontend") || strings.Contains(s, "ui") || strings.Contains(s, "client") {
+		return "javascript"
+	}
+	if strings.Contains(s, "iam") || strings.Contains(s, "gendoc") || strings.Contains(s, "php") {
+		return "php"
+	}
+	if strings.Contains(s, "dictionary") || strings.Contains(s, "project") || strings.Contains(s, "asanpay") || strings.Contains(s, "protocol") || strings.Contains(s, "java") || strings.Contains(s, "billing") || strings.Contains(s, "payment") {
+		return "java"
+	}
+	if strings.Contains(s, "adapter") || strings.Contains(s, "python") {
+		return "python"
+	}
+	if strings.Contains(s, "external") || strings.Contains(s, "node") {
+		return "javascript"
+	}
+	return "go"
 }

@@ -140,6 +140,7 @@ func (s *Store) syncState() {
 					ServiceName:      svc.ServiceName,
 					Namespace:        svc.Namespace,
 					IsInfrastructure: svc.IsInfrastructure,
+					Language:         svc.Language,
 				}
 				newStatsCache[k] = existing
 			}

@@ -384,6 +384,13 @@ func (s *Store) updateStats(span *models.Span) {
 	if stat.Cluster == "" && span.Cluster != "" {
 		stat.Cluster = span.Cluster
 	}
+	if stat.Language == "" && span.Attributes != nil {
+		if lang, ok := span.Attributes["telemetry.sdk.language"]; ok && lang != "" {
+			stat.Language = strings.ToLower(lang)
+		} else if rt, ok := span.Attributes["process.runtime.name"]; ok && rt != "" {
+			stat.Language = strings.ToLower(rt)
+		}
+	}
 
 	stat.RequestCount++
 	if span.Status == models.SpanStatusError {

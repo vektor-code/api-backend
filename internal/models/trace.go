@@ -93,6 +93,7 @@ type ServiceStats struct {
 	P99Ms            float64   `json:"p99Ms"`
 	LastSeen         time.Time `json:"lastSeen"`
 	IsInfrastructure bool      `json:"isInfrastructure"`
+	Language         string    `json:"language,omitempty"`
 }
 
 // NamespaceStats holds aggregated metrics per namespace
