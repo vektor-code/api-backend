@@ -98,26 +98,41 @@ func getInfraNodeName(span *models.Span, baseName string) string {
 		peerName = span.Attributes["network.peer.address"]
 	}
 
+	port := span.Attributes["net.peer.port"]
+	if port == "" {
+		port = span.Attributes["server.port"]
+	}
+
+	// Address/IP formulation
+	addr := peerName
+	if addr == "" {
+		addr = span.Attributes["net.peer.ip"]
+	}
+	if addr != "" {
+		if port != "" && !strings.Contains(addr, ":") {
+			addr = addr + ":" + port
+		}
+	} else if port != "" {
+		addr = ":" + port
+	}
+
 	resourceName := dbName
 	if resourceName == "" {
 		resourceName = msgDest
 	}
 
 	resource := ""
-	if peerName != "" && resourceName != "" {
-		cleanRes := strings.Trim(resourceName, "()")
-		if cleanRes == "anonymous" || cleanRes == "unknown" {
-			resource = peerName
-		} else {
-			resource = peerName + "/" + cleanRes
-		}
-	} else if resourceName != "" {
-		cleanRes := strings.Trim(resourceName, "()")
-		if cleanRes == "anonymous" || cleanRes == "unknown" {
-			resource = ""
+	cleanRes := strings.Trim(resourceName, "()")
+	hasCleanRes := cleanRes != "" && cleanRes != "anonymous" && cleanRes != "unknown"
+
+	if hasCleanRes {
+		if addr != "" {
+			resource = cleanRes + " @ " + addr
 		} else {
 			resource = cleanRes
 		}
+	} else if addr != "" {
+		resource = addr
 	} else if peerName != "" {
 		resource = peerName
 	}

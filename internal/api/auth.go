@@ -10,6 +10,7 @@ import (
 	"github.com/go-ldap/ldap/v3"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/kubetrace/api-backend/internal/store"
 )
 
 type LoginRequest struct {
@@ -50,10 +51,10 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 	role := "user"
 
 	if req.Mode == "ldap" {
-		if os.Getenv("LDAP_ENABLED") == "false" {
+		if h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED")) == "false" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "LDAP authentication is disabled"})
 		}
-		user, err := loginLDAP(req.Username, req.Password)
+		user, err := loginLDAP(h.store, req.Username, req.Password)
 		if err != nil {
 			log.Printf("[auth] LDAP login failure for user '%s': %v", req.Username, err)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "LDAP authentication failed: invalid credentials or connection error"})
@@ -158,14 +159,14 @@ func AuthMiddleware() fiber.Handler {
 	}
 }
 
-func loginLDAP(username, password string) (*LDAPUser, error) {
-	ldapURL := os.Getenv("LDAP_URL")
-	bindDN := os.Getenv("LDAP_BIND_DN")
-	bindPassword := os.Getenv("LDAP_BIND_PASSWORD")
-	userBaseDN := os.Getenv("LDAP_USER_BASE_DN")
-	userFilterTemplate := os.Getenv("LDAP_USER_FILTER")
-	nameAttr := os.Getenv("LDAP_USER_NAME_ATTR")
-	emailAttr := os.Getenv("LDAP_USER_EMAIL_ATTR")
+func loginLDAP(s *store.Store, username, password string) (*LDAPUser, error) {
+	ldapURL := s.GetInfraConfig("LDAP_URL", os.Getenv("LDAP_URL"))
+	bindDN := s.GetInfraConfig("LDAP_BIND_DN", os.Getenv("LDAP_BIND_DN"))
+	bindPassword := s.GetInfraConfig("LDAP_BIND_PASSWORD", os.Getenv("LDAP_BIND_PASSWORD"))
+	userBaseDN := s.GetInfraConfig("LDAP_USER_BASE_DN", os.Getenv("LDAP_USER_BASE_DN"))
+	userFilterTemplate := s.GetInfraConfig("LDAP_USER_FILTER", os.Getenv("LDAP_USER_FILTER"))
+	nameAttr := s.GetInfraConfig("LDAP_USER_NAME_ATTR", os.Getenv("LDAP_USER_NAME_ATTR"))
+	emailAttr := s.GetInfraConfig("LDAP_USER_EMAIL_ATTR", os.Getenv("LDAP_USER_EMAIL_ATTR"))
 
 	if ldapURL == "" {
 		return nil, fmt.Errorf("LDAP_URL is not configured")

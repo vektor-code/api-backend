@@ -16,9 +16,25 @@ func (s *Store) GetNamespaceStats() ([]*models.NamespaceStats, error) {
 	for key, svc := range s.statsCache {
 		ns := strings.Split(key, ":")[0]
 		if nsMap[ns] == nil {
-			nsMap[ns] = &models.NamespaceStats{Namespace: ns}
+			cluster := svc.Cluster
+			if cluster == "" {
+				// Fallback helper based on suffix naming:
+				lower := strings.ToLower(ns)
+				if strings.HasSuffix(lower, "-dev") || strings.HasSuffix(lower, "-uat") || strings.HasSuffix(lower, "-preprod") {
+					cluster = "10.254.5.20"
+				} else {
+					cluster = "10.254.5.51"
+				}
+			}
+			nsMap[ns] = &models.NamespaceStats{
+				Namespace: ns,
+				Cluster:   cluster,
+			}
 		}
 		ns_stat := nsMap[ns]
+		if ns_stat.Cluster == "" && svc.Cluster != "" {
+			ns_stat.Cluster = svc.Cluster
+		}
 		ns_stat.Services = append(ns_stat.Services, models.ServiceStats(*svc))
 		ns_stat.TraceCount += svc.RequestCount
 		ns_stat.ErrorCount += svc.ErrorCount

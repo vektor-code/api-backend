@@ -51,7 +51,9 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	// Admin & cluster routes
 	api.Get("/clusters", h.GetClusters)
 	api.Get("/admin/config", h.GetAdminConfig)
+	api.Post("/admin/config", h.UpdateAdminConfig)
 	api.Get("/admin/namespaces", h.GetNamespaceStatuses)
+	api.Get("/admin/instrumentations", h.GetAdminInstrumentations)
 	api.Post("/admin/namespaces/toggle", h.ToggleNamespace)
 	api.Post("/admin/namespaces/add", h.AddNamespace)
 	api.Post("/admin/namespaces/delete", h.DeleteNamespace)

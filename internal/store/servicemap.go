@@ -48,6 +48,11 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 	// Snapshot the statsCache keys once for O(1) microservice lookups
 	statsCacheSnapshot := s.statsCache
 
+	disabledMap := make(map[string]bool)
+	for _, ns := range s.GetDisabledNamespaces() {
+		disabledMap[ns] = true
+	}
+
 	data := &models.ServiceMapData{Namespace: namespace}
 	edgeMap := make(map[string]*models.ServiceEdge)
 	infraNodes := make(map[string]*models.ServiceStats)
@@ -57,6 +62,9 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		if namespace != "" {
 			hasNs := false
 			for _, sp := range trace.Spans {
+				if disabledMap[sp.Namespace] {
+					continue
+				}
 				if sp.Namespace == namespace {
 					hasNs = true
 					break
@@ -71,6 +79,9 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		spanMap := make(map[string]*models.Span, len(trace.Spans))
 		parentSet := make(map[string]bool, len(trace.Spans))
 		for _, sp := range trace.Spans {
+			if disabledMap[sp.Namespace] {
+				continue
+			}
 			s.enrichSpanMetadata(sp)
 			spanMap[sp.SpanID] = sp
 			if sp.ParentSpanID != "" {
@@ -79,6 +90,9 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		}
 
 		for _, sp := range trace.Spans {
+			if disabledMap[sp.Namespace] {
+				continue
+			}
 			// Check for external database or messaging infrastructure calls,
 			// or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
 			dbSystem, hasDb := sp.Attributes["db.system"]
@@ -233,6 +247,9 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 	for key, svc := range s.statsCache {
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
+			continue
+		}
+		if disabledMap[parts[0]] {
 			continue
 		}
 		if namespace == "" || parts[0] == namespace {

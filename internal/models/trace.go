@@ -84,6 +84,7 @@ type TraceListItem struct {
 type ServiceStats struct {
 	ServiceName      string    `json:"serviceName"`
 	Namespace        string    `json:"namespace"`
+	Cluster          string    `json:"cluster,omitempty"`
 	RequestCount     int64     `json:"requestCount"`
 	ErrorCount       int64     `json:"errorCount"`
 	ErrorRate        float64   `json:"errorRate"`
@@ -97,6 +98,7 @@ type ServiceStats struct {
 // NamespaceStats holds aggregated metrics per namespace
 type NamespaceStats struct {
 	Namespace    string         `json:"namespace"`
+	Cluster      string         `json:"cluster,omitempty"`
 	TraceCount   int64          `json:"traceCount"`
 	ErrorCount   int64          `json:"errorCount"`
 	ErrorRate    float64        `json:"errorRate"`

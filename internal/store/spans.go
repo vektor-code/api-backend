@@ -377,8 +377,12 @@ func (s *Store) updateStats(span *models.Span) {
 		stat = &models.ServiceStats{
 			ServiceName: span.ServiceName,
 			Namespace:   span.Namespace,
+			Cluster:     span.Cluster,
 		}
 		s.statsCache[key] = stat
+	}
+	if stat.Cluster == "" && span.Cluster != "" {
+		stat.Cluster = span.Cluster
 	}
 
 	stat.RequestCount++

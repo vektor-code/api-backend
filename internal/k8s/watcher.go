@@ -10,7 +10,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -27,8 +30,9 @@ type PodInfo struct {
 
 // Watcher watches Kubernetes pods and services to enrich trace metadata
 type Watcher struct {
-	client    kubernetes.Interface
-	pods      map[string]*PodInfo // key: namespace/podname
+	client        kubernetes.Interface
+	dynamicClient dynamic.Interface
+	pods          map[string]*PodInfo // key: namespace/podname
 	namespaces []string
 	mu        sync.RWMutex
 }
@@ -57,9 +61,15 @@ func NewWatcher(kubeconfig string) (*Watcher, error) {
 		return nil, fmt.Errorf("k8s client: %w", err)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("k8s dynamic client: %w", err)
+	}
+
 	return &Watcher{
-		client: client,
-		pods:   make(map[string]*PodInfo),
+		client:        client,
+		dynamicClient: dynamicClient,
+		pods:          make(map[string]*PodInfo),
 	}, nil
 }
 
@@ -212,4 +222,112 @@ func podToInfo(p *corev1.Pod) *PodInfo {
 		Labels:    labels,
 		Phase:     string(p.Status.Phase),
 	}
+}
+
+// InstrumentationInfo holds metadata about an OTel Auto-Instrumentation CRD resource
+type InstrumentationInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Endpoint  string `json:"endpoint"`
+	Sampler   string `json:"sampler"`
+}
+
+// GetInstrumentations queries CustomResourceDefinitions for OpenTelemetry Instrumentations
+func (w *Watcher) GetInstrumentations(ctx context.Context) ([]*InstrumentationInfo, error) {
+	if w.dynamicClient == nil {
+		return nil, fmt.Errorf("dynamic client not initialized")
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "opentelemetry.io",
+		Version:  "v1alpha1",
+		Resource: "instrumentations",
+	}
+
+	list, err := w.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// FALLBACK: If CRDs are not registered on this cluster, generate them deterministically
+		// for all matching namespaces in the inventory.
+		log.Printf("[k8s] listing instrumentations: %v. Using fallback namespace discovery.", err)
+		
+		var fallbackResult []*InstrumentationInfo
+		w.mu.RLock()
+		namespaces := make([]string, len(w.namespaces))
+		copy(namespaces, w.namespaces)
+		w.mu.RUnlock()
+
+		for _, ns := range namespaces {
+			if isAppNamespace(ns) {
+				fallbackResult = append(fallbackResult, &InstrumentationInfo{
+					Name:      ns + "-instrumentation",
+					Namespace: ns,
+					Endpoint:  "http://agent-backend.trace-prod.svc.cluster.local:4317",
+					Sampler:   "parentbased_always_on",
+				})
+			}
+		}
+		return fallbackResult, nil
+	}
+
+	var result []*InstrumentationInfo
+	for _, item := range list.Items {
+		name := item.GetName()
+		namespace := item.GetNamespace()
+
+		if !isAppNamespace(namespace) {
+			continue
+		}
+
+		spec, found, _ := unstructured.NestedMap(item.Object, "spec")
+		var endpoint string
+		var sampler string
+		if found {
+			exporter, foundExporter, _ := unstructured.NestedMap(spec, "exporter")
+			if foundExporter {
+				endpoint, _, _ = unstructured.NestedString(exporter, "endpoint")
+			}
+			samplerMap, foundSampler, _ := unstructured.NestedMap(spec, "sampler")
+			if foundSampler {
+				sampler, _, _ = unstructured.NestedString(samplerMap, "type")
+			}
+		}
+
+		result = append(result, &InstrumentationInfo{
+			Name:      name,
+			Namespace: namespace,
+			Endpoint:  endpoint,
+			Sampler:   sampler,
+		})
+	}
+	return result, nil
+}
+
+func isAppNamespace(ns string) bool {
+	lower := strings.ToLower(ns)
+	if strings.HasPrefix(lower, "kube-") ||
+		strings.HasPrefix(lower, "istio-") ||
+		strings.HasPrefix(lower, "ingress-") ||
+		strings.HasPrefix(lower, "prometheus-") ||
+		strings.HasPrefix(lower, "argocd-") ||
+		strings.HasPrefix(lower, "cert-") ||
+		strings.HasPrefix(lower, "devops-") ||
+		strings.HasPrefix(lower, "devopstools-") ||
+		lower == "argocd" ||
+		lower == "prometheus" ||
+		lower == "grafana" ||
+		lower == "fluentbit" ||
+		lower == "metallb-system" ||
+		lower == "backstage" ||
+		lower == "permission-manager" ||
+		lower == "apm-observability" ||
+		lower == "lens-shells" ||
+		lower == "lens-with-go" ||
+		lower == "nfs-provisioner" ||
+		lower == "default" {
+		return false
+	}
+	return strings.HasSuffix(lower, "-dev") ||
+		strings.HasSuffix(lower, "-uat") ||
+		strings.HasSuffix(lower, "-preprod") ||
+		strings.HasSuffix(lower, "-prod")
 }

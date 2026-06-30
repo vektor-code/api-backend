@@ -43,6 +43,11 @@ func (s *Store) InitPostgres(connStr string) error {
 			configured BOOLEAN DEFAULT true,
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS infra_configs (
+			config_key VARCHAR(255) PRIMARY KEY,
+			config_value TEXT,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -53,4 +58,30 @@ func (s *Store) InitPostgres(connStr string) error {
 	s.postgresEnabled = true
 	log.Println("[store/postgres] connection initialized successfully")
 	return nil
+}
+
+// GetInfraConfig retrieves a dynamic config value from postgres, falling back to defaultValue
+func (s *Store) GetInfraConfig(key string, defaultValue string) string {
+	if !s.postgresEnabled || s.db == nil {
+		return defaultValue
+	}
+	var val string
+	err := s.db.QueryRow("SELECT config_value FROM infra_configs WHERE config_key = $1", key).Scan(&val)
+	if err != nil {
+		return defaultValue
+	}
+	return val
+}
+
+// SaveInfraConfig updates or inserts a dynamic config value in postgres
+func (s *Store) SaveInfraConfig(key string, value string) error {
+	if !s.postgresEnabled || s.db == nil {
+		return fmt.Errorf("postgres is not enabled")
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO infra_configs (config_key, config_value, updated_at)
+		VALUES ($1, $2, CURRENT_TIMESTAMP)
+		ON CONFLICT (config_key) DO UPDATE SET config_value = $2, updated_at = CURRENT_TIMESTAMP
+	`, key, value)
+	return err
 }

@@ -711,25 +711,25 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 		}
 	}
 
-	// Read environment variables
-	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
-	kafkaTopic := os.Getenv("KAFKA_TOPIC")
-	kafkaGroup := os.Getenv("KAFKA_GROUP")
+	// Read dynamic configs falling back to environment variables
+	kafkaBrokers := h.store.GetInfraConfig("KAFKA_BROKERS", os.Getenv("KAFKA_BROKERS"))
+	kafkaTopic := h.store.GetInfraConfig("KAFKA_TOPIC", os.Getenv("KAFKA_TOPIC"))
+	kafkaGroup := h.store.GetInfraConfig("KAFKA_GROUP", os.Getenv("KAFKA_GROUP"))
 
-	clickhouseURL := os.Getenv("CLICKHOUSE_URL")
+	clickhouseURL := h.store.GetInfraConfig("CLICKHOUSE_URL", os.Getenv("CLICKHOUSE_URL"))
 
-	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
-	minioUseSSL := os.Getenv("MINIO_USE_SSL")
-	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
-	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
-	minioBucket := os.Getenv("MINIO_BUCKET")
+	minioEndpoint := h.store.GetInfraConfig("MINIO_ENDPOINT", os.Getenv("MINIO_ENDPOINT"))
+	minioUseSSL := h.store.GetInfraConfig("MINIO_USE_SSL", os.Getenv("MINIO_USE_SSL"))
+	minioAccessKey := h.store.GetInfraConfig("MINIO_ACCESS_KEY", os.Getenv("MINIO_ACCESS_KEY"))
+	minioSecretKey := h.store.GetInfraConfig("MINIO_SECRET_KEY", os.Getenv("MINIO_SECRET_KEY"))
+	minioBucket := h.store.GetInfraConfig("MINIO_BUCKET", os.Getenv("MINIO_BUCKET"))
 
-	ldapEnabled := os.Getenv("LDAP_ENABLED")
-	ldapURL := os.Getenv("LDAP_URL")
-	ldapBindDN := os.Getenv("LDAP_BIND_DN")
-	ldapBindPassword := os.Getenv("LDAP_BIND_PASSWORD")
-	ldapUserBaseDN := os.Getenv("LDAP_USER_BASE_DN")
-	ldapUserFilter := os.Getenv("LDAP_USER_FILTER")
+	ldapEnabled := h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED"))
+	ldapURL := h.store.GetInfraConfig("LDAP_URL", os.Getenv("LDAP_URL"))
+	ldapBindDN := h.store.GetInfraConfig("LDAP_BIND_DN", os.Getenv("LDAP_BIND_DN"))
+	ldapBindPassword := h.store.GetInfraConfig("LDAP_BIND_PASSWORD", os.Getenv("LDAP_BIND_PASSWORD"))
+	ldapUserBaseDN := h.store.GetInfraConfig("LDAP_USER_BASE_DN", os.Getenv("LDAP_USER_BASE_DN"))
+	ldapUserFilter := h.store.GetInfraConfig("LDAP_USER_FILTER", os.Getenv("LDAP_USER_FILTER"))
 
 	return c.JSON(fiber.Map{
 		"kafka": fiber.Map{
@@ -761,6 +761,60 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 			"timezone":     os.Getenv("TZ"),
 		},
 	})
+}
+
+// POST /api/admin/config
+func (h *Handler) UpdateAdminConfig(c *fiber.Ctx) error {
+	// Verify user is admin
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	var req map[string]interface{}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	// Parse nested fields and save them using SaveInfraConfig
+	if kafka, ok := req["kafka"].(map[string]interface{}); ok {
+		if brokers, ok := kafka["brokers"].(string); ok { h.store.SaveInfraConfig("KAFKA_BROKERS", brokers) }
+		if topic, ok := kafka["topic"].(string); ok { h.store.SaveInfraConfig("KAFKA_TOPIC", topic) }
+		if group, ok := kafka["group"].(string); ok { h.store.SaveInfraConfig("KAFKA_GROUP", group) }
+	}
+	if clickhouse, ok := req["clickhouse"].(map[string]interface{}); ok {
+		if url, ok := clickhouse["url"].(string); ok { h.store.SaveInfraConfig("CLICKHOUSE_URL", url) }
+	}
+	if minio, ok := req["minio"].(map[string]interface{}); ok {
+		if endpoint, ok := minio["endpoint"].(string); ok { h.store.SaveInfraConfig("MINIO_ENDPOINT", endpoint) }
+		if useSSL, ok := minio["useSSL"].(string); ok { h.store.SaveInfraConfig("MINIO_USE_SSL", useSSL) }
+		if accessKey, ok := minio["accessKey"].(string); ok { h.store.SaveInfraConfig("MINIO_ACCESS_KEY", accessKey) }
+		if secretKey, ok := minio["secretKey"].(string); ok {
+			currentMinioSecretKey := h.store.GetInfraConfig("MINIO_SECRET_KEY", os.Getenv("MINIO_SECRET_KEY"))
+			if secretKey != "******" && secretKey != maskSecret(currentMinioSecretKey) {
+				h.store.SaveInfraConfig("MINIO_SECRET_KEY", secretKey)
+			}
+		}
+		if bucket, ok := minio["bucket"].(string); ok { h.store.SaveInfraConfig("MINIO_BUCKET", bucket) }
+	}
+	if ldap, ok := req["ldap"].(map[string]interface{}); ok {
+		if enabled, ok := ldap["enabled"].(string); ok { h.store.SaveInfraConfig("LDAP_ENABLED", enabled) }
+		if url, ok := ldap["url"].(string); ok { h.store.SaveInfraConfig("LDAP_URL", url) }
+		if bindDN, ok := ldap["bindDN"].(string); ok { h.store.SaveInfraConfig("LDAP_BIND_DN", bindDN) }
+		if bindPassword, ok := ldap["bindPassword"].(string); ok {
+			currentLdapBindPassword := h.store.GetInfraConfig("LDAP_BIND_PASSWORD", os.Getenv("LDAP_BIND_PASSWORD"))
+			if bindPassword != "******" && bindPassword != maskSecret(currentLdapBindPassword) {
+				h.store.SaveInfraConfig("LDAP_BIND_PASSWORD", bindPassword)
+			}
+		}
+		if userBaseDN, ok := ldap["userBaseDN"].(string); ok { h.store.SaveInfraConfig("LDAP_USER_BASE_DN", userBaseDN) }
+		if userFilter, ok := ldap["userFilter"].(string); ok { h.store.SaveInfraConfig("LDAP_USER_FILTER", userFilter) }
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "Infrastructure configurations updated successfully"})
 }
 
 // GET /api/admin/namespaces
@@ -909,6 +963,32 @@ func (h *Handler) DeleteNamespace(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 	})
+}
+
+// GET /api/admin/instrumentations
+func (h *Handler) GetAdminInstrumentations(c *fiber.Ctx) error {
+	userClaims, ok := c.Locals("user").(*jwt.Token)
+	if ok {
+		claims, ok := userClaims.Claims.(jwt.MapClaims)
+		if ok && claims["role"] != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+		}
+	}
+
+	if h.k8s == nil {
+		return c.JSON(fiber.Map{"instrumentations": []interface{}{}})
+	}
+
+	list, err := h.k8s.GetInstrumentations(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	if list == nil {
+		return c.JSON(fiber.Map{"instrumentations": []interface{}{}})
+	}
+
+	return c.JSON(fiber.Map{"instrumentations": list})
 }
 
 func maskSecret(secret string) string {
