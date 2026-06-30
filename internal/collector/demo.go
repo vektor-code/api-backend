@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -158,7 +159,7 @@ func (d *DemoGenerator) generateTrace() {
 
 		d.saveAndBroadcast(child)
 
-		if rand.Float64() < 0.6 {
+		if rand.Float64() < 0.6 && !strings.Contains(svc, "-frontend") {
 			dbDuration := 1 + rand.Float64()*childDuration*0.6
 			dbStart := childStart.Add(2 * time.Millisecond)
 			dbSpan := &models.Span{
