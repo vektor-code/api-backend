@@ -1,30 +1,43 @@
 package store
 
 import (
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/kubetrace/api-backend/internal/models"
 )
 
-// GetNamespaceStats returns namespace-level statistics
+// GetNamespaceStats returns pre-computed namespace-level statistics.
+// Returns instantly from cache; the cache is rebuilt by syncState() after each merge.
 func (s *Store) GetNamespaceStats() ([]*models.NamespaceStats, error) {
-	s.statsMu.RLock()
-	defer s.statsMu.RUnlock()
+	s.precomputedStatsMu.RLock()
+	cached := s.precomputedStats
+	s.precomputedStatsMu.RUnlock()
 
+	if cached != nil {
+		return cached, nil
+	}
+
+	// First call before any sync has run — compute inline
+	s.rebuildPrecomputedStats()
+
+	s.precomputedStatsMu.RLock()
+	defer s.precomputedStatsMu.RUnlock()
+	return s.precomputedStats, nil
+}
+
+// rebuildPrecomputedStats recomputes the namespace stats from statsCache
+// and stores the result for instant retrieval by GetNamespaceStats.
+func (s *Store) rebuildPrecomputedStats() {
+	s.statsMu.RLock()
 	nsMap := make(map[string]*models.NamespaceStats)
 	for key, svc := range s.statsCache {
 		ns := strings.Split(key, ":")[0]
 		if nsMap[ns] == nil {
 			cluster := svc.Cluster
 			if cluster == "" {
-				// Fallback helper based on suffix naming:
-				lower := strings.ToLower(ns)
-				if strings.HasSuffix(lower, "-dev") || strings.HasSuffix(lower, "-uat") || strings.HasSuffix(lower, "-preprod") {
-					cluster = "10.254.5.20"
-				} else {
-					cluster = "10.254.5.51"
-				}
+				cluster = s.getClusterName()
 			}
 			nsMap[ns] = &models.NamespaceStats{
 				Namespace: ns,
@@ -42,6 +55,7 @@ func (s *Store) GetNamespaceStats() ([]*models.NamespaceStats, error) {
 			ns_stat.LastActivity = svc.LastSeen
 		}
 	}
+	s.statsMu.RUnlock()
 
 	result := make([]*models.NamespaceStats, 0, len(nsMap))
 	for _, ns := range nsMap {
@@ -54,7 +68,10 @@ func (s *Store) GetNamespaceStats() ([]*models.NamespaceStats, error) {
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Namespace < result[j].Namespace
 	})
-	return result, nil
+
+	s.precomputedStatsMu.Lock()
+	s.precomputedStats = result
+	s.precomputedStatsMu.Unlock()
 }
 
 // GetTracePodsByNamespace scans recent traces and extracts unique pod metadata
@@ -96,4 +113,21 @@ func (s *Store) GetTracePodsByNamespace(namespace string) []TracePodInfo {
 		result = append(result, *p)
 	}
 	return result
+}
+
+func (s *Store) getClusterName() string {
+	if name := os.Getenv("CLUSTER_NAME"); name != "" {
+		return name
+	}
+	if name := os.Getenv("KUBERNETES_CLUSTER_NAME"); name != "" {
+		return name
+	}
+	s.clustersMu.RLock()
+	defer s.clustersMu.RUnlock()
+	for c := range s.detectedClusters {
+		if c != "" && c != "default" {
+			return c
+		}
+	}
+	return "cluster.local"
 }

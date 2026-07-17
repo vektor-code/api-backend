@@ -121,24 +121,46 @@ func getInfraNodeName(span *models.Span, baseName string) string {
 		resourceName = msgDest
 	}
 
-	resource := ""
 	cleanRes := strings.Trim(resourceName, "()")
 	hasCleanRes := cleanRes != "" && cleanRes != "anonymous" && cleanRes != "unknown"
 
-	if hasCleanRes {
-		if addr != "" {
-			resource = cleanRes + " @ " + addr
-		} else {
-			resource = cleanRes
+	hostPart := addr
+	if hostPart == "" {
+		if peerName != "" {
+			hostPart = peerName
+		} else if span.Attributes["net.peer.ip"] != "" {
+			hostPart = span.Attributes["net.peer.ip"]
 		}
-	} else if addr != "" {
-		resource = addr
-	} else if peerName != "" {
-		resource = peerName
 	}
 
-	if resource != "" {
-		return strings.ToLower(baseName) + " (" + resource + ")"
+	detailParts := []string{}
+	if hasCleanRes {
+		if strings.ToLower(baseName) == "dns" {
+			detailParts = append(detailParts, "question: "+cleanRes)
+		} else {
+			detailParts = append(detailParts, "db: "+cleanRes)
+		}
+	}
+	if dbUser := span.Attributes["db.user"]; dbUser != "" {
+		detailParts = append(detailParts, "user: "+dbUser)
+	}
+	if dbVersion := span.Attributes["db.version"]; dbVersion != "" {
+		detailParts = append(detailParts, "version: "+dbVersion)
+	} else if pgVer := span.Attributes["db.postgresql.version"]; pgVer != "" {
+		detailParts = append(detailParts, "version: "+pgVer)
+	}
+
+	detailPart := ""
+	if len(detailParts) > 0 {
+		detailPart = strings.Join(detailParts, " / ")
+	}
+
+	if hostPart != "" && detailPart != "" {
+		return strings.ToLower(baseName) + " (" + hostPart + " / " + detailPart + ")"
+	} else if hostPart != "" {
+		return strings.ToLower(baseName) + " (" + hostPart + ")"
+	} else if detailPart != "" {
+		return strings.ToLower(baseName) + " (" + detailPart + ")"
 	}
 	return strings.ToLower(baseName)
 }
@@ -148,15 +170,23 @@ func getClientDependencyName(span *models.Span) string {
 	if peer := span.Attributes["peer.service"]; peer != "" {
 		return peer
 	}
-	
-	if strings.Contains(strings.ToLower(span.Name), "vault") {
-		return "vault"
+	// APM detection must come before Vault — both often use port 8200
+	spanNameLower := strings.ToLower(span.Name)
+	urlLower := strings.ToLower(span.Attributes["http.url"])
+	hostLower := strings.ToLower(span.Attributes["server.address"])
+	if hostLower == "" {
+		hostLower = strings.ToLower(span.Attributes["net.peer.name"])
 	}
-	if urlStr := span.Attributes["http.url"]; urlStr != "" && strings.Contains(strings.ToLower(urlStr), "vault") {
+
+	if strings.Contains(spanNameLower, "apm") || strings.Contains(urlLower, "apm") || strings.Contains(hostLower, "apm") {
+		return "apm"
+	}
+
+	if strings.Contains(spanNameLower, "vault") || strings.Contains(urlLower, "vault") {
 		return "vault"
 	}
 
-	if strings.Contains(strings.ToLower(span.Name), "dns") {
+	if strings.Contains(spanNameLower, "dns") {
 		return "dns"
 	}
 

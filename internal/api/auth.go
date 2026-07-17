@@ -67,6 +67,10 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 		if user.IsAdmin {
 			role = "admin"
 		}
+		// Apply stored permissions (or the default template on first login).
+		if perm := h.store.RecordUserLogin(req.Username, displayName, email, user.IsAdmin); perm != nil {
+			role = perm.Role
+		}
 	} else {
 		// Local Admin auth
 		adminUser := os.Getenv("ADMIN_USERNAME")

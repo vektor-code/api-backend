@@ -36,6 +36,7 @@ func (s *Store) InitPostgres(connStr string) error {
 		CREATE TABLE IF NOT EXISTS disabled_namespaces (
 			namespace VARCHAR(255) PRIMARY KEY,
 			disabled BOOLEAN DEFAULT true,
+			explicitly_enabled BOOLEAN DEFAULT false,
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS configured_namespaces (
@@ -54,8 +55,16 @@ func (s *Store) InitPostgres(connStr string) error {
 		return fmt.Errorf("failed to execute migrations: %w", err)
 	}
 
+	// Opt-in instrumentation: legacy rows with disabled=false are not treated as enabled until admin toggles.
+	_, _ = db.Exec(`ALTER TABLE disabled_namespaces ADD COLUMN IF NOT EXISTS explicitly_enabled BOOLEAN DEFAULT false`)
+	_, _ = db.Exec(`UPDATE disabled_namespaces SET explicitly_enabled = false WHERE explicitly_enabled IS NULL`)
+
 	s.db = db
 	s.postgresEnabled = true
+
+	if err := s.initPermissionTables(); err != nil {
+		log.Printf("[store/postgres] permission tables init failed: %v", err)
+	}
 	log.Println("[store/postgres] connection initialized successfully")
 	return nil
 }

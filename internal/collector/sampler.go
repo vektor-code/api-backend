@@ -3,9 +3,15 @@ package collector
 import (
 	"hash/fnv"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// forceKeepTTL is how long a trace stays force-sampled after an error span,
+// so the rest of its spans (across services and namespaces) are kept and the
+// full flow stays intact instead of only the error span surviving sampling.
+const forceKeepTTL = 5 * time.Minute
 
 // AdaptiveSampler dynamically adjusts trace sampling based on incoming span rates
 type AdaptiveSampler struct {
@@ -13,8 +19,10 @@ type AdaptiveSampler struct {
 	currentRatio uint32         // Current sampling ratio in basis points (0-10000, where 10000 is 100%)
 	spansCount   int64          // Atomic counter of spans evaluated in the current window
 	spansSampled int64          // Atomic counter of spans kept in the current window
-	windowSize   time.Duration  
+	windowSize   time.Duration
 	stopChan     chan struct{}
+
+	forceKeep sync.Map // traceID -> expiry time.Time; traces pinned by an error span
 }
 
 // NewAdaptiveSampler initializes and starts the adaptive sampling loop
@@ -38,10 +46,20 @@ func (s *AdaptiveSampler) Stop() {
 func (s *AdaptiveSampler) ShouldSample(traceID string, isError bool) bool {
 	atomic.AddInt64(&s.spansCount, 1)
 
-	// Always sample error spans to ensure visibility into failures
+	// Always sample error spans, and pin the whole trace so its remaining
+	// spans are kept too — otherwise multi-service/multi-namespace flows
+	// would show only the failing span with no surrounding context.
 	if isError {
+		s.forceKeep.Store(traceID, time.Now().Add(forceKeepTTL))
 		atomic.AddInt64(&s.spansSampled, 1)
 		return true
+	}
+	if exp, ok := s.forceKeep.Load(traceID); ok {
+		if t, ok := exp.(time.Time); ok && time.Now().Before(t) {
+			atomic.AddInt64(&s.spansSampled, 1)
+			return true
+		}
+		s.forceKeep.Delete(traceID)
 	}
 
 	ratio := atomic.LoadUint32(&s.currentRatio)
@@ -81,6 +99,15 @@ func (s *AdaptiveSampler) runAdjuster() {
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
+			// Evict expired force-kept traces
+			now := time.Now()
+			s.forceKeep.Range(func(k, v any) bool {
+				if t, ok := v.(time.Time); ok && now.After(t) {
+					s.forceKeep.Delete(k)
+				}
+				return true
+			})
+
 			// Read and reset counters
 			incoming := atomic.SwapInt64(&s.spansCount, 0)
 			sampled := atomic.SwapInt64(&s.spansSampled, 0)

@@ -9,32 +9,41 @@ import (
 	"github.com/kubetrace/api-backend/internal/models"
 )
 
-// SaveSpan writes a span to MinIO
+// SaveSpan enriches a span and hands it to the active storage pipeline:
+// ClickHouse mode publishes to Kafka (consumed by ingestor-backend into
+// ClickHouse); legacy mode writes per-span JSON to MinIO and maintains the
+// in-memory replication caches.
 func (s *Store) SaveSpan(span *models.Span) error {
 	s.enrichSpanMetadata(span)
 
-	data, err := json.Marshal(span)
-	if err != nil {
-		return err
-	}
+	if s.chMode {
+		if s.producer != nil {
+			s.producer.enqueue(span)
+		}
+	} else {
+		data, err := json.Marshal(span)
+		if err != nil {
+			return err
+		}
 
-	// S3 path: traces/namespace/service/traceID/spanID.json
-	objectName := fmt.Sprintf("traces/%s/%s/%s/%s.json", span.Namespace, span.ServiceName, span.TraceID, span.SpanID)
-	
-	// Queue the upload task with drop-on-overflow logic to protect S3/MinIO disk I/O and prevent CPU iowait
-	task := uploadTask{
-		objectName:  objectName,
-		data:        data,
-		contentType: "application/json",
-	}
-	select {
-	case s.uploadChan <- task:
-	default:
-		// Queue is full; discard S3 upload to protect system stability
-	}
+		// S3 path: traces/namespace/service/traceID/spanID.json
+		objectName := fmt.Sprintf("traces/%s/%s/%s/%s.json", span.Namespace, span.ServiceName, span.TraceID, span.SpanID)
 
-	s.updateLocalStats(span)
-	s.updateLocalRecentTraces(span)
+		// Queue the upload task with drop-on-overflow logic to protect S3/MinIO disk I/O and prevent CPU iowait
+		task := uploadTask{
+			objectName:  objectName,
+			data:        data,
+			contentType: "application/json",
+		}
+		select {
+		case s.uploadChan <- task:
+		default:
+			// Queue is full; discard S3 upload to protect system stability
+		}
+
+		s.updateLocalStats(span)
+		s.updateLocalRecentTraces(span)
+	}
 
 	if span.Cluster != "" {
 		s.clustersMu.Lock()
@@ -57,8 +66,27 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	}
 	span.Attributes["__vektor_enriched__"] = "true"
 
+	// Try to resolve/extract database metadata from Kubernetes pod details
+	if span.PodName != "" && span.Namespace != "" {
+		pods := s.GetReportedPods(span.Namespace)
+		for _, pod := range pods {
+			if pod.Name == span.PodName {
+				if span.Attributes["db.name"] == "" && pod.DatabaseName != "" {
+					span.Attributes["db.name"] = pod.DatabaseName
+				}
+				if span.Attributes["net.peer.name"] == "" && span.Attributes["server.address"] == "" && pod.DatabaseHost != "" {
+					span.Attributes["server.address"] = pod.DatabaseHost
+				}
+				if span.Attributes["net.peer.port"] == "" && span.Attributes["server.port"] == "" && pod.DatabasePort != "" {
+					span.Attributes["server.port"] = pod.DatabasePort
+				}
+				break
+			}
+		}
+	}
+
 	// Try to resolve/extract database name if missing or generic
-	if dbName := parseDbNameFromAttributes(span); dbName != "" {
+	if dbName := parseDbNameFromAttributes(s, span); dbName != "" {
 		span.Attributes["db.name"] = dbName
 	}
 
@@ -134,7 +162,11 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 			inferredSystem = "minio"
 			isDb = true
 		}
-		if strings.Contains(valLower, "vault") {
+		if strings.Contains(valLower, "apm") {
+			inferredSystem = "apm"
+			isDb = true
+		}
+		if inferredSystem == "" && strings.Contains(valLower, "vault") {
 			inferredSystem = "vault"
 			isDb = true
 		}
@@ -152,6 +184,15 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		}
 		if strings.Contains(valLower, "kong") {
 			inferredSystem = "kong"
+			isDb = true
+		}
+	}
+
+	// 2b. Hostname-based disambiguation — resolves conflicts where different
+	// services share the same port (e.g. APM Server and Vault both use 8200).
+	if inferredSystem == "" && peerName != "" {
+		if strings.Contains(peerName, "apm") {
+			inferredSystem = "apm"
 			isDb = true
 		}
 	}
@@ -187,7 +228,12 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 			inferredSystem = "elasticsearch"
 			isDb = true
 		case "8200", "8201":
-			inferredSystem = "vault"
+			// Disambiguate: APM servers also commonly use port 8200
+			if strings.Contains(peerName, "apm") {
+				inferredSystem = "apm"
+			} else {
+				inferredSystem = "vault"
+			}
 			isDb = true
 		case "9000", "9001":
 			inferredSystem = "minio"
@@ -235,6 +281,9 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 		}
 		if strings.Contains(str, "minio") || strings.Contains(str, "s3") {
 			return "minio", true, false
+		}
+		if strings.Contains(str, "apm") {
+			return "apm", true, false
 		}
 		if strings.Contains(str, "vault") {
 			return "vault", true, false
@@ -325,17 +374,17 @@ func (s *Store) enrichSpanMetadata(span *models.Span) {
 	_, hasDbName := span.Attributes["db.name"]
 	if (hasDbName || dbStmt != "") && (inferredSystem == "" || inferredSystem == "database") {
 		isDb = true
-		
+
 		// Attempt to refine generic "database" system into a specific brand using SQL syntax analysis
 		if dbStmt != "" {
 			q := strings.ToLower(dbStmt)
-			
+
 			// postgresql patterns (type casts, double quotes around table/column names, postgres functions, pg client prefixes)
 			hasPgCast := strings.Contains(dbStmt, "::")
 			hasDoubleQuote := strings.Contains(dbStmt, `"`) && !strings.Contains(dbStmt, "`")
 			hasPgFunc := strings.Contains(q, "now()") || strings.Contains(q, "string_agg(") || strings.Contains(q, "coalesce(")
 			hasPgParams := strings.Contains(dbStmt, "$1") || strings.Contains(dbStmt, "$2")
-			
+
 			if hasPgCast || hasPgParams || (hasDoubleQuote && (hasPgFunc || strings.Contains(q, "select ") || strings.Contains(q, "insert ") || strings.Contains(q, "update "))) {
 				inferredSystem = "postgresql"
 			} else if strings.Contains(dbStmt, "`") {
@@ -384,11 +433,9 @@ func (s *Store) updateStats(span *models.Span) {
 	if stat.Cluster == "" && span.Cluster != "" {
 		stat.Cluster = span.Cluster
 	}
-	if stat.Language == "" && span.Attributes != nil {
-		if lang, ok := span.Attributes["telemetry.sdk.language"]; ok && lang != "" {
-			stat.Language = strings.ToLower(lang)
-		} else if rt, ok := span.Attributes["process.runtime.name"]; ok && rt != "" {
-			stat.Language = strings.ToLower(rt)
+	if (stat.Language == "" || stat.Language == "unknown") && span.Attributes != nil {
+		if lang := DetectLanguageFromSpan(span); lang != "" {
+			stat.Language = lang
 		}
 	}
 
@@ -396,13 +443,126 @@ func (s *Store) updateStats(span *models.Span) {
 	if span.Status == models.SpanStatusError {
 		stat.ErrorCount++
 	}
-	if stat.RequestCount > 0 {
-		stat.ErrorRate = float64(stat.ErrorCount) / float64(stat.RequestCount) * 100
-	}
 	stat.LastSeen = time.Now()
+	updateLatencyEstimates(stat, span.DurationMs)
+	finalizeServiceStats(stat)
+}
 
-	n := float64(stat.RequestCount)
-	stat.P50Ms = (stat.P50Ms*(n-1) + span.DurationMs) / n
+// DetectLanguageFromSpan extracts runtime languages dynamically from span metrics and library telemetry metadata
+func DetectLanguageFromSpan(span *models.Span) string {
+	if span == nil || span.Attributes == nil {
+		return ""
+	}
+
+	// 1. Standard telemetry SDK language resource attributes
+	if lang, ok := span.Attributes["telemetry.sdk.language"]; ok && lang != "" {
+		return cleanLanguage(lang)
+	}
+
+	// 2. Process runtime name (e.g. openjdk, go, node)
+	if rt, ok := span.Attributes["process.runtime.name"]; ok && rt != "" {
+		return cleanLanguage(rt)
+	}
+
+	// 3. OTel Scope / Instrumentation Library Name
+	if scope, ok := span.Attributes["otel.library.name"]; ok && scope != "" {
+		sLower := strings.ToLower(scope)
+		if strings.Contains(sLower, "java") {
+			return "java"
+		}
+		if strings.Contains(sLower, "node") || strings.Contains(sLower, "express") || strings.Contains(sLower, "nextjs") || strings.Contains(sLower, "hapi") || strings.Contains(sLower, "koa") || strings.Contains(sLower, "js") {
+			return "nodejs"
+		}
+		if strings.Contains(sLower, "python") || strings.Contains(sLower, "flask") || strings.Contains(sLower, "django") || strings.Contains(sLower, "fastapi") {
+			return "python"
+		}
+		if strings.Contains(sLower, "go.opentelemetry") || strings.Contains(sLower, "otel/go") {
+			return "go"
+		}
+		if strings.Contains(sLower, "dotnet") || strings.Contains(sLower, "aspnet") || strings.Contains(sLower, "microsoft") {
+			return "dotnet"
+		}
+		if strings.Contains(sLower, "php") {
+			return "php"
+		}
+	}
+
+	// 4. Attribute Key and Value heuristics (nested framework libraries)
+	for k, v := range span.Attributes {
+		kLower := strings.ToLower(k)
+		vLower := strings.ToLower(v)
+
+		// Java specific attributes
+		if strings.HasPrefix(kLower, "java.") || strings.Contains(kLower, "jvm.") || strings.Contains(vLower, "spring-boot") || strings.Contains(vLower, "hibernate") {
+			return "java"
+		}
+		// Node.js specific attributes
+		if strings.HasPrefix(kLower, "nodejs.") || strings.Contains(kLower, "express.") || strings.Contains(kLower, "javascript.") {
+			return "nodejs"
+		}
+		// Python specific attributes
+		if strings.Contains(kLower, "python.") || strings.Contains(vLower, "wsgi") || strings.Contains(vLower, "django") || strings.Contains(vLower, "flask") {
+			return "python"
+		}
+		// Go specific attributes
+		if strings.Contains(kLower, "go.runtime") || strings.Contains(kLower, "goroutine") {
+			return "go"
+		}
+		// Dotnet specific attributes
+		if strings.HasPrefix(kLower, "dotnet.") || strings.Contains(kLower, "aspnetcore.") || strings.Contains(vLower, "microsoft.aspnetcore") {
+			return "dotnet"
+		}
+		// PHP specific attributes
+		if strings.HasPrefix(kLower, "php.") || strings.Contains(vLower, "laravel") || strings.Contains(vLower, "symfony") {
+			return "php"
+		}
+	}
+
+	// 5. Name heuristics as fallback
+	sName := strings.ToLower(span.ServiceName)
+	if strings.Contains(sName, "java") || strings.Contains(sName, "spring") || strings.Contains(sName, "boot") {
+		return "java"
+	}
+	if strings.Contains(sName, "node") || strings.Contains(sName, "express") || strings.Contains(sName, "javascript") || strings.Contains(sName, "typescript") {
+		return "nodejs"
+	}
+	if strings.Contains(sName, "python") || strings.Contains(sName, "django") || strings.Contains(sName, "flask") || strings.Contains(sName, "fastapi") {
+		return "python"
+	}
+	if strings.Contains(sName, "golang") || strings.Contains(sName, "go-") || strings.HasSuffix(sName, "-go") {
+		return "go"
+	}
+	if strings.Contains(sName, "dotnet") || strings.Contains(sName, "csharp") || strings.Contains(sName, "aspnet") {
+		return "dotnet"
+	}
+	if strings.Contains(sName, "php") || strings.Contains(sName, "laravel") || strings.Contains(sName, "symfony") {
+		return "php"
+	}
+
+	return ""
+}
+
+func cleanLanguage(lang string) string {
+	l := strings.ToLower(lang)
+	if strings.Contains(l, "java") {
+		return "java"
+	}
+	if strings.Contains(l, "node") || strings.Contains(l, "js") || strings.Contains(l, "javascript") || strings.Contains(l, "typescript") {
+		return "nodejs"
+	}
+	if strings.Contains(l, "python") || strings.Contains(l, "cpython") {
+		return "python"
+	}
+	if strings.Contains(l, "go") || strings.Contains(l, "golang") {
+		return "go"
+	}
+	if strings.Contains(l, "dotnet") || strings.Contains(l, "c#") || strings.Contains(l, "csharp") {
+		return "dotnet"
+	}
+	if strings.Contains(l, "php") {
+		return "php"
+	}
+	return l
 }
 
 func (s *Store) updateRecentTraces(span *models.Span) {
@@ -416,7 +576,7 @@ func (s *Store) updateRecentTraces(span *models.Span) {
 		}
 		s.recentTraces[span.TraceID] = trace
 	}
-	
+
 	// Add span if not exists
 	exists := false
 	for _, sp := range trace.Spans {
@@ -443,21 +603,21 @@ func (s *Store) updateLocalStats(span *models.Span) {
 		stat = &models.ServiceStats{
 			ServiceName: span.ServiceName,
 			Namespace:   span.Namespace,
+			Cluster:     span.Cluster,
 		}
 		s.localStats[key] = stat
+	}
+	if stat.Cluster == "" && span.Cluster != "" {
+		stat.Cluster = span.Cluster
 	}
 
 	stat.RequestCount++
 	if span.Status == models.SpanStatusError {
 		stat.ErrorCount++
 	}
-	if stat.RequestCount > 0 {
-		stat.ErrorRate = float64(stat.ErrorCount) / float64(stat.RequestCount) * 100
-	}
 	stat.LastSeen = time.Now()
-
-	n := float64(stat.RequestCount)
-	stat.P50Ms = (stat.P50Ms*(n-1) + span.DurationMs) / n
+	updateLatencyEstimates(stat, span.DurationMs)
+	finalizeServiceStats(stat)
 }
 
 func (s *Store) updateLocalRecentTraces(span *models.Span) {
@@ -466,12 +626,19 @@ func (s *Store) updateLocalRecentTraces(span *models.Span) {
 
 	trace, ok := s.localTraces[span.TraceID]
 	if !ok {
+		// Cap in-memory traces map to protect container from OOM under high telemetry throughput
+		if len(s.localTraces) >= s.maxTraces {
+			for id := range s.localTraces {
+				delete(s.localTraces, id)
+				break
+			}
+		}
 		trace = &models.Trace{
 			TraceID: span.TraceID,
 		}
 		s.localTraces[span.TraceID] = trace
 	}
-	
+
 	exists := false
 	for _, sp := range trace.Spans {
 		if sp.SpanID == span.SpanID {
@@ -484,6 +651,20 @@ func (s *Store) updateLocalRecentTraces(span *models.Span) {
 		updatedTrace := buildTrace(trace.TraceID, trace.Spans)
 		s.localTraces[span.TraceID] = updatedTrace
 	}
+}
+
+// isRootParentID returns true if the parent span ID indicates this is a root span.
+// OTLP encodes a missing parent as zero bytes; fmt.Sprintf("%x") turns that into "0".
+func isRootParentID(id string) bool {
+	if id == "" {
+		return true
+	}
+	for _, c := range id {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 // buildTrace assembles a Trace from raw spans
@@ -500,7 +681,7 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 	cluster := ""
 
 	for _, sp := range spans {
-		if sp.ParentSpanID == "" {
+		if isRootParentID(sp.ParentSpanID) {
 			rootSpan = sp
 		}
 		if minStart.IsZero() || sp.StartTime.Before(minStart) {
@@ -537,21 +718,28 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 
 // GetRecentSpans returns all spans from in-memory traces, optionally filtered by namespace
 func (s *Store) GetRecentSpans(namespace string) []*models.Span {
+	activeMap := s.GetApplicationActivationMap()
+
 	s.tracesMu.RLock()
 	defer s.tracesMu.RUnlock()
 
 	var spans []*models.Span
 	for _, trace := range s.recentTraces {
-		if namespace != "" && trace.Namespace != namespace {
-			continue
+		for _, sp := range trace.Spans {
+			if namespace != "" && sp.Namespace != namespace {
+				continue
+			}
+			if enabled, exists := activeMap[sp.Namespace+":"+sp.ServiceName]; exists && !enabled {
+				continue
+			}
+			spans = append(spans, sp)
 		}
-		spans = append(spans, trace.Spans...)
 	}
 	return spans
 }
 
 // parseDbNameFromAttributes resolves/extracts db name from OpenTelemetry tags
-func parseDbNameFromAttributes(span *models.Span) string {
+func parseDbNameFromAttributes(s *Store, span *models.Span) string {
 	if span == nil || span.Attributes == nil {
 		return ""
 	}
@@ -596,56 +784,15 @@ func parseDbNameFromAttributes(span *models.Span) string {
 	dbName = strings.TrimSpace(strings.ToLower(dbName))
 	dbName = strings.Trim(dbName, "'\"` ")
 
-	// 6. Heuristic mapping: Resolve target database host IP to apply service-based fallbacks
-	peerName := strings.ToLower(attrs["net.peer.name"])
-	if peerName == "" {
-		peerName = strings.ToLower(attrs["server.address"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(attrs["peer.service"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(attrs["net.peer.ip"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(attrs["network.peer.address"])
-	}
-
-	connStr := strings.ToLower(attrs["db.connection_string"])
-	isDbHost := peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30") || strings.Contains(connStr, "10.254.5.30")
-
-	// Correct any truncated names (e.g. "rmis_project_backend_d" -> "rmis_project_backend_dev")
+	// Correct any truncated names
 	if strings.HasPrefix(dbName, "rmis_project_backend_d") {
 		dbName = "rmis_project_backend_dev"
 	}
 
-	// If calling our database host, apply namespace/service fallbacks to map missing database names
-	if isDbHost {
-		serviceLower := strings.ToLower(span.ServiceName)
-		nsLower := strings.ToLower(span.Namespace)
-
-		if dbName == "" || dbName == "unknown" || dbName == "postgres" || dbName == "postgresql" {
-			if strings.Contains(nsLower, "emuhasibatliq") || strings.Contains(serviceLower, "emuhasibatliq") {
-				dbName = "emuhasibatliq_dev"
-			} else if strings.Contains(nsLower, "econtract") || strings.Contains(serviceLower, "econtract") {
-				dbName = "econtract_dev"
-			} else if strings.Contains(nsLower, "rmis") || strings.Contains(serviceLower, "rmis") {
-				if strings.Contains(serviceLower, "project") {
-					dbName = "rmis_project_backend_dev"
-				} else if strings.Contains(serviceLower, "iam") {
-					dbName = "rmis_iam_backend_dev"
-				} else if strings.Contains(serviceLower, "dictionary") {
-					dbName = "rmis_dictionary_backend_dev"
-				} else if strings.Contains(serviceLower, "agroprom") {
-					dbName = "rmis_agroprom_backend_dev"
-				} else if strings.Contains(serviceLower, "gendoc") {
-					dbName = "rmis_gendoc_backend_dev"
-				} else {
-					cleanSvc := strings.TrimSuffix(serviceLower, "-backend")
-					cleanSvc = strings.TrimPrefix(cleanSvc, "rmis-")
-					dbName = "rmis_" + cleanSvc + "_dev"
-				}
-			}
+	// Apply namespace/service fallbacks dynamically from reported pods config
+	if dbName == "" || dbName == "unknown" || dbName == "postgres" || dbName == "postgresql" {
+		if reportedDb := s.GetReportedDatabaseForService(span.Namespace, span.ServiceName); reportedDb != "" {
+			dbName = reportedDb
 		}
 	}
 
@@ -739,7 +886,7 @@ func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
 	if span.Attributes["db.system"] != "" || span.Attributes["messaging.system"] != "" {
 		return false, ""
 	}
-	
+
 	host := span.Attributes["server.address"]
 	if host == "" {
 		host = span.Attributes["net.peer.name"]
@@ -759,26 +906,26 @@ func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
 			}
 		}
 	}
-	
+
 	if host == "" {
 		return false, ""
 	}
-	
+
 	hostLower := strings.ToLower(host)
 	cleanHost := hostLower
 	if idx := strings.Index(cleanHost, ":"); idx != -1 {
 		cleanHost = cleanHost[:idx]
 	}
-	
+
 	// Skip localhost, local IP addresses, and private cluster ranges
 	if cleanHost == "localhost" || cleanHost == "127.0.0.1" || strings.HasPrefix(cleanHost, "10.") || strings.HasPrefix(cleanHost, "192.168.") || strings.HasPrefix(cleanHost, "172.") {
 		return false, ""
 	}
-	
+
 	if strings.HasSuffix(cleanHost, ".local") || strings.HasSuffix(cleanHost, ".svc") || strings.Contains(cleanHost, ".svc.cluster") || strings.HasSuffix(cleanHost, ".internal") {
 		return false, ""
 	}
-	
+
 	// Check if this host matches an internal microservice name
 	s.statsMu.RLock()
 	defer s.statsMu.RUnlock()
@@ -788,9 +935,9 @@ func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
 			return false, ""
 		}
 	}
-	
+
 	hasDot := strings.Contains(cleanHost, ".")
-	
+
 	// Determine 3rd-party tool name
 	toolName := ""
 	if strings.Contains(cleanHost, "stripe") {
@@ -833,6 +980,6 @@ func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
 		}
 		toolName = cleanHost
 	}
-	
+
 	return true, toolName
 }

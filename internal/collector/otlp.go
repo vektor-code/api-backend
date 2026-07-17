@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -60,22 +61,32 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 		// Extract service name and namespace from resource attributes
 		serviceName := "unknown"
 		namespace := "default"
-		clusterName := "default"
+		clusterName := os.Getenv("CLUSTER_NAME")
+		if clusterName == "" {
+			clusterName = os.Getenv("KUBERNETES_CLUSTER_NAME")
+		}
+		if clusterName == "" {
+			clusterName = "default"
+		}
 		podName := ""
 		nodeName := ""
 
+		resAttrs := make(map[string]string)
 		for _, attr := range rs.Resource.GetAttributes() {
-			switch attr.Key {
+			k := attr.Key
+			v := stringVal(attr.Value)
+			resAttrs[k] = v
+			switch k {
 			case "service.name":
-				serviceName = stringVal(attr.Value)
+				serviceName = v
 			case "k8s.namespace.name":
-				namespace = stringVal(attr.Value)
+				namespace = v
 			case "k8s.cluster.name":
-				clusterName = stringVal(attr.Value)
+				clusterName = v
 			case "k8s.pod.name":
-				podName = stringVal(attr.Value)
+				podName = v
 			case "k8s.node.name":
-				nodeName = stringVal(attr.Value)
+				nodeName = v
 			}
 		}
 
@@ -84,8 +95,28 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 		}
 
 		for _, ss := range rs.ScopeSpans {
+			scopeName := ""
+			scopeVersion := ""
+			if ss.Scope != nil {
+				scopeName = ss.Scope.Name
+				scopeVersion = ss.Scope.Version
+			}
 			for _, sp := range ss.Spans {
 				span := convertSpan(sp, serviceName, namespace, clusterName, podName, nodeName)
+				if span.Attributes == nil {
+					span.Attributes = make(map[string]string)
+				}
+				if scopeName != "" {
+					span.Attributes["otel.library.name"] = scopeName
+				}
+				if scopeVersion != "" {
+					span.Attributes["otel.library.version"] = scopeVersion
+				}
+				for k, v := range resAttrs {
+					if _, ok := span.Attributes[k]; !ok {
+						span.Attributes[k] = v
+					}
+				}
 				isError := span.Status == models.SpanStatusError
 				if r.sampler != nil && !r.sampler.ShouldSample(span.TraceID, isError) {
 					continue

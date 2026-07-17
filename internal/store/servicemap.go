@@ -38,6 +38,10 @@ func (s *Store) InvalidateServiceMapCache() {
 // buildServiceMap performs the full trace-scan computation.
 // Expensive — call sparingly (only on cache miss or after invalidation).
 func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
+	// Preload the activation map once outside the traces & stats locks to avoid DB queries inside locks
+	activeMap := s.GetApplicationActivationMap()
+	configMap := s.GetApplicationConfigMap()
+
 	// Take both locks upfront and release at the end — this is safe because
 	// buildServiceMap never calls isMicroservice (which would re-acquire statsMu).
 	s.statsMu.RLock()
@@ -84,13 +88,16 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 			}
 			s.enrichSpanMetadata(sp)
 			spanMap[sp.SpanID] = sp
-			if sp.ParentSpanID != "" {
+			if !isRootParentID(sp.ParentSpanID) {
 				parentSet[sp.ParentSpanID] = true
 			}
 		}
 
 		for _, sp := range trace.Spans {
 			if disabledMap[sp.Namespace] {
+				continue
+			}
+			if enabled, exists := activeMap[sp.Namespace+":"+sp.ServiceName]; exists && !enabled {
 				continue
 			}
 			// Check for external database or messaging infrastructure calls,
@@ -177,7 +184,7 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 					if sp.Status == models.SpanStatusError {
 						infra.ErrorCount++
 					}
-					infra.P50Ms = (infra.P50Ms*float64(infra.RequestCount-1) + sp.DurationMs) / float64(infra.RequestCount)
+					updateLatencyEstimates(infra, sp.DurationMs)
 				}
 			}
 
@@ -244,6 +251,7 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		}
 	}
 
+	seenNodes := make(map[string]bool)
 	for key, svc := range s.statsCache {
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
@@ -252,17 +260,78 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		if disabledMap[parts[0]] {
 			continue
 		}
+
+		cfg, exists := configMap[parts[0]+":"+svc.ServiceName]
+		if exists {
+			if !cfg.Enabled {
+				continue
+			}
+		} else {
+			if enabled, activeExists := activeMap[parts[0]+":"+svc.ServiceName]; activeExists && !enabled {
+				continue
+			}
+		}
+
 		if namespace == "" || parts[0] == namespace {
-			data.Nodes = append(data.Nodes, models.ServiceStats(*svc))
+			node := *svc
+			if exists && cfg.Language != "" {
+				node.Language = cfg.Language
+			}
+			data.Nodes = append(data.Nodes, node)
+			seenNodes[parts[0]+":"+svc.ServiceName] = true
+		}
+	}
+
+	// Auto-detect and add any standalone/uninstrumented services from reported pods
+	var reportedPods []ReportedPod
+	if namespace == "" {
+		reportedPods = s.GetReportedPods("")
+	} else {
+		reportedPods = s.GetReportedPods(namespace)
+	}
+
+	for _, p := range reportedPods {
+		if p.IsFrontend {
+			continue
+		}
+		if disabledMap[p.Namespace] {
+			continue
+		}
+		svcName := p.ServiceName()
+		if svcName == "" {
+			continue
+		}
+
+		cfg, exists := configMap[p.Namespace+":"+svcName]
+		if exists {
+			if !cfg.Enabled {
+				continue
+			}
+		} else {
+			if enabled, activeExists := activeMap[p.Namespace+":"+svcName]; activeExists && !enabled {
+				continue
+			}
+		}
+
+		key := p.Namespace + ":" + svcName
+		if !seenNodes[key] {
+			seenNodes[key] = true
+			lang := p.Language
+			if exists && cfg.Language != "" {
+				lang = cfg.Language
+			}
+			data.Nodes = append(data.Nodes, models.ServiceStats{
+				ServiceName: svcName,
+				Namespace:   p.Namespace,
+				Language:    lang,
+			})
 		}
 	}
 
 	// Append infrastructure nodes
 	for _, infra := range infraNodes {
 		if namespace == "" || infra.Namespace == namespace {
-			if infra.RequestCount > 0 {
-				infra.ErrorRate = float64(infra.ErrorCount) / float64(infra.RequestCount) * 100
-			}
+			finalizeServiceStats(infra)
 			data.Nodes = append(data.Nodes, *infra)
 		}
 	}
@@ -279,20 +348,17 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		}
 	}
 	if hasInternetEdge {
-		errRate := 0.0
-		if internetCalls > 0 {
-			errRate = float64(internetErrors) / float64(internetCalls) * 100.0
-		}
-		data.Nodes = append(data.Nodes, models.ServiceStats{
+		internet := models.ServiceStats{
 			ServiceName:  "Internet",
 			Namespace:    namespace,
 			RequestCount: internetCalls,
 			ErrorCount:   internetErrors,
-			ErrorRate:    errRate,
 			P50Ms:        0,
 			P95Ms:        0,
 			P99Ms:        0,
-		})
+		}
+		finalizeServiceStats(&internet)
+		data.Nodes = append(data.Nodes, internet)
 	}
 
 	for _, edge := range edgeMap {
@@ -306,7 +372,7 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 // using a pre-captured statsCache snapshot (no lock needed).
 func isMicroserviceFromSnapshot(cache map[string]*models.ServiceStats, namespace, name string) bool {
 	nameLower := strings.ToLower(name)
-	if strings.HasSuffix(nameLower, "-backend") || strings.HasSuffix(nameLower, "-frontend") ||
+	if strings.HasSuffix(nameLower, "-backend") ||
 		nameLower == "ingress-nginx" || nameLower == "gateway" {
 		return true
 	}
@@ -340,7 +406,7 @@ func resolveServiceNamespaceFromSnapshot(cache map[string]*models.ServiceStats, 
 // Kept for callers outside buildServiceMap that do not hold statsMu.
 func (s *Store) isMicroservice(namespace string, name string) bool {
 	nameLower := strings.ToLower(name)
-	if strings.HasSuffix(nameLower, "-backend") || strings.HasSuffix(nameLower, "-frontend") || nameLower == "ingress-nginx" || nameLower == "gateway" {
+	if strings.HasSuffix(nameLower, "-backend") || nameLower == "ingress-nginx" || nameLower == "gateway" {
 		return true
 	}
 	s.statsMu.RLock()

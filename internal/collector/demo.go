@@ -22,27 +22,6 @@ func NewDemoGenerator(s *store.Store, onSpan SpanHandler) *DemoGenerator {
 	return &DemoGenerator{store: s, onSpan: onSpan}
 }
 
-var demoNamespaces = []string{
-	"bmis-dev", "bmis-uat", "rmis-dev", "rmis-uat",
-	"econtract-dev", "econtract-uat", "dmrm-dev", "dmrm-uat",
-	"ebudget-dev", "icmal-dev", "icmal-uat", "erusum-dev",
-}
-
-var demoServices = map[string][]string{
-	"bmis-dev":      {"gateway-backend", "api-backend", "dictionary-backend", "app-frontend"},
-	"bmis-uat":      {"gateway-backend", "api-backend", "dictionary-backend", "app-frontend"},
-	"rmis-dev":      {"intgw-backend", "extgw-backend", "project-backend", "iam-backend", "gendoc-backend", "app-frontend"},
-	"rmis-uat":      {"intgw-backend", "extgw-backend", "project-backend", "iam-backend", "app-frontend"},
-	"econtract-dev": {"gateway-backend", "api-backend", "scheduler-backend", "app-frontend"},
-	"econtract-uat": {"gateway-backend", "api-backend", "scheduler-backend", "app-frontend"},
-	"dmrm-dev":      {"gateway-backend", "api-backend", "adapter-backend", "app-frontend"},
-	"dmrm-uat":      {"gateway-backend", "api-backend", "app-frontend"},
-	"ebudget-dev":   {"api-backend", "app-frontend"},
-	"icmal-dev":     {"intgw-backend", "extgw-backend", "protocol-backend", "protocolnum-backend", "appnew-frontend"},
-	"icmal-uat":     {"intgw-backend", "extgw-backend", "protocol-backend", "protocolnum-backend", "appnew-frontend"},
-	"erusum-dev":    {"gateway-backend", "asanpay-backend", "external-backend", "gppservice-backend", "app-frontend"},
-}
-
 var demoOperations = []string{
 	"GET /api/v1/documents",
 	"POST /api/v1/documents",
@@ -77,8 +56,24 @@ func (d *DemoGenerator) Start(interval time.Duration) {
 }
 
 func (d *DemoGenerator) generateTrace() {
-	ns := demoNamespaces[rand.Intn(len(demoNamespaces))]
-	services := demoServices[ns]
+	// Dynamically discover namespaces from Kubernetes reported pods
+	namespaces := d.store.GetReportedNamespaces()
+	if len(namespaces) == 0 {
+		return
+	}
+
+	ns := namespaces[rand.Intn(len(namespaces))]
+
+	// Dynamically discover services from Kubernetes pod labels
+	rawServices := d.store.GetServicesForNamespace(ns)
+	var services []string
+	for _, svc := range rawServices {
+		svcLower := strings.ToLower(svc)
+		if strings.Contains(svcLower, "frontend") || strings.Contains(svcLower, "ui") || strings.Contains(svcLower, "client") {
+			continue
+		}
+		services = append(services, svc)
+	}
 	if len(services) == 0 {
 		return
 	}
@@ -100,16 +95,16 @@ func (d *DemoGenerator) generateTrace() {
 		Name:        operation,
 		ServiceName: rootSvc,
 		Namespace:   ns,
-		PodName:     fmt.Sprintf("%s-abc123-xyz", rootSvc),
+		PodName:     d.getRealPodName(ns, rootSvc),
 		StartTime:   now,
 		EndTime:     now.Add(time.Duration(rootDuration) * time.Millisecond),
 		DurationMs:  rootDuration,
 		Status:      models.SpanStatusOK,
 		Kind:        models.SpanKindServer,
 		Attributes: map[string]string{
-			"http.method": operation[:3],
-			"http.url":    operation[4:],
-			"telemetry.sdk.language": getServiceLanguage(rootSvc),
+			"http.method":            operation[:3],
+			"http.url":               operation[4:],
+			"telemetry.sdk.language": d.getServiceLanguageFromK8s(ns, rootSvc),
 		},
 	}
 
@@ -125,9 +120,9 @@ func (d *DemoGenerator) generateTrace() {
 
 	currentOffset := 5.0
 	parentID := rootSpanID
-	numChildren := 1 + rand.Intn(len(services)-1)
-	if numChildren > len(services)-1 {
-		numChildren = len(services) - 1
+	numChildren := 0
+	if len(services) > 1 {
+		numChildren = 1 + rand.Intn(len(services)-1)
 	}
 
 	for i := 0; i < numChildren; i++ {
@@ -144,7 +139,7 @@ func (d *DemoGenerator) generateTrace() {
 			Name:         fmt.Sprintf("%s.process", svc),
 			ServiceName:  svc,
 			Namespace:    ns,
-			PodName:      fmt.Sprintf("%s-abc123-xyz", svc),
+			PodName:      d.getRealPodName(ns, svc),
 			StartTime:    childStart,
 			EndTime:      childStart.Add(time.Duration(childDuration) * time.Millisecond),
 			DurationMs:   childDuration,
@@ -152,7 +147,7 @@ func (d *DemoGenerator) generateTrace() {
 			Kind:         models.SpanKindServer,
 			Attributes: map[string]string{
 				"component":              svc,
-				"telemetry.sdk.language": getServiceLanguage(svc),
+				"telemetry.sdk.language": d.getServiceLanguageFromK8s(ns, svc),
 			},
 		}
 
@@ -218,22 +213,35 @@ func randomDBOp() string {
 	return ops[rand.Intn(len(ops))]
 }
 
-func getServiceLanguage(svc string) string {
+// getServiceLanguageFromK8s uses the reported pod language from Kubernetes,
+// falling back to name-based heuristics only when K8s data is not available.
+func (d *DemoGenerator) getServiceLanguageFromK8s(ns, svc string) string {
+	// First try the dynamically detected language from Kubernetes pod inspection
+	lang := d.store.GetReportedLanguageForService(ns, svc)
+	if lang != "" {
+		// Normalize common language names
+		l := strings.ToLower(lang)
+		if l == "nodejs" || l == "js" || l == "typescript" {
+			return "javascript"
+		}
+		return l
+	}
+
+	// Fallback: name-based heuristics
 	s := strings.ToLower(svc)
 	if strings.Contains(s, "frontend") || strings.Contains(s, "ui") || strings.Contains(s, "client") {
-		return "javascript"
-	}
-	if strings.Contains(s, "iam") || strings.Contains(s, "gendoc") || strings.Contains(s, "php") {
-		return "php"
-	}
-	if strings.Contains(s, "dictionary") || strings.Contains(s, "project") || strings.Contains(s, "asanpay") || strings.Contains(s, "protocol") || strings.Contains(s, "java") || strings.Contains(s, "billing") || strings.Contains(s, "payment") {
-		return "java"
-	}
-	if strings.Contains(s, "adapter") || strings.Contains(s, "python") {
-		return "python"
-	}
-	if strings.Contains(s, "external") || strings.Contains(s, "node") {
-		return "javascript"
+		return ""
 	}
 	return "go"
+}
+
+func (d *DemoGenerator) getRealPodName(ns, svc string) string {
+	pods := d.store.GetReportedPods(ns)
+	for _, p := range pods {
+		if p.MatchesService(svc) {
+			return p.Name
+		}
+	}
+	// If no matching pod found, return the service name itself (no random generation)
+	return svc
 }

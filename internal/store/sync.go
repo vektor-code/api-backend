@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
@@ -30,6 +34,26 @@ func (s *Store) runGC() {
 				delete(s.localStats, key)
 			}
 		}
+		// Enforce maxTraces cap: if still over limit, evict oldest traces
+		if len(s.localTraces) > s.maxTraces {
+			// Collect trace IDs sorted by start time
+			type traceEntry struct {
+				id    string
+				start time.Time
+			}
+			entries := make([]traceEntry, 0, len(s.localTraces))
+			for id, t := range s.localTraces {
+				entries = append(entries, traceEntry{id, t.StartTime})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].start.Before(entries[j].start)
+			})
+			// Evict oldest entries until we're under the cap
+			evictCount := len(entries) - s.maxTraces
+			for i := 0; i < evictCount; i++ {
+				delete(s.localTraces, entries[i].id)
+			}
+		}
 		s.localMu.Unlock()
 	}
 }
@@ -41,7 +65,7 @@ func (s *Store) runSync() {
 	_ = s.LoadDisabledNamespaces()
 	_ = s.LoadConfiguredNamespaces()
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.syncState()
@@ -123,7 +147,7 @@ func (s *Store) syncState() {
 		if err != nil {
 			continue
 		}
-		
+
 		var pState PodState
 		dec := json.NewDecoder(objReader)
 		err = dec.Decode(&pState)
@@ -155,9 +179,7 @@ func (s *Store) syncState() {
 			if svc.LastSeen.After(existing.LastSeen) {
 				existing.LastSeen = svc.LastSeen
 			}
-			if totalReq > 0 {
-				existing.ErrorRate = float64(existing.ErrorCount) / float64(totalReq) * 100
-			}
+			finalizeServiceStats(existing)
 		}
 
 		// Merge traces
@@ -184,6 +206,25 @@ func (s *Store) syncState() {
 
 	// Hot-swap global caches only if we successfully retrieved and parsed state files
 	if len(objects) > 0 {
+		// Enforce maxTraces cap on merged traces before swapping
+		if len(newRecentTraces) > s.maxTraces {
+			type traceEntry struct {
+				id    string
+				start time.Time
+			}
+			entries := make([]traceEntry, 0, len(newRecentTraces))
+			for id, t := range newRecentTraces {
+				entries = append(entries, traceEntry{id, t.StartTime})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].start.Before(entries[j].start)
+			})
+			evictCount := len(entries) - s.maxTraces
+			for i := 0; i < evictCount; i++ {
+				delete(newRecentTraces, entries[i].id)
+			}
+		}
+
 		s.statsMu.Lock()
 		s.statsCache = newStatsCache
 		s.statsMu.Unlock()
@@ -195,9 +236,11 @@ func (s *Store) syncState() {
 		// Invalidate pre-computed service maps so the next API call rebuilds them
 		// from the fresh statsCache + recentTraces data.
 		s.InvalidateServiceMapCache()
+
+		// Rebuild pre-computed namespace stats so /api/stats returns instantly
+		s.rebuildPrecomputedStats()
 	}
 }
-
 
 // runMinioGC periodically deletes traces from MinIO that are older than 12 hours
 func (s *Store) runMinioGC() {
@@ -216,8 +259,13 @@ func (s *Store) cleanOldMinioTraces() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	cutoff := time.Now().Add(-12 * time.Hour)
-	log.Printf("[GC] Starting MinIO log retention cleanup (traces older than 12h: %v)...", cutoff)
+	hours := s.GetRetentionHours()
+	if hours <= 0 {
+		// 0 = keep forever: never GC legacy MinIO trace objects.
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(hours) * time.Hour)
+	log.Printf("[GC] Starting MinIO log retention cleanup (traces older than %dh: %v)...", hours, cutoff)
 
 	objectsCh := make(chan minio.ObjectInfo, 100)
 	var count int64
@@ -248,4 +296,79 @@ func (s *Store) cleanOldMinioTraces() {
 	}
 
 	log.Printf("[GC] MinIO log retention cleanup finished. Removed %d objects.", count)
+}
+
+// DeleteAllMinioTraces removes all traces under traces/ prefix from MinIO bucket
+// and clears in-memory caches.
+func (s *Store) DeleteAllMinioTraces() (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	objectsCh := make(chan minio.ObjectInfo, 100)
+	var count int64
+
+	go func() {
+		defer close(objectsCh)
+		for obj := range s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+			Prefix:    "traces/",
+			Recursive: true,
+		}) {
+			if obj.Err != nil {
+				continue
+			}
+			objectsCh <- obj
+			count++
+		}
+	}()
+
+	errorCh := s.client.RemoveObjects(ctx, s.bucketName, objectsCh, minio.RemoveObjectsOptions{})
+	for err := range errorCh {
+		if err.Err != nil {
+			log.Printf("[GC] Error removing object %s during manual delete: %v", err.ObjectName, err.Err)
+		}
+	}
+
+	// Also clear memory caches so dashboard updates instantly
+	s.statsMu.Lock()
+	s.statsCache = make(map[string]*models.ServiceStats)
+	s.statsMu.Unlock()
+
+	s.tracesMu.Lock()
+	s.recentTraces = make(map[string]*models.Trace)
+	s.tracesMu.Unlock()
+
+	s.localMu.Lock()
+	s.localStats = make(map[string]*models.ServiceStats)
+	s.localTraces = make(map[string]*models.Trace)
+	s.localMu.Unlock()
+
+	s.InvalidateServiceMapCache()
+
+	// Clear ClickHouse spans
+	clickhouseURL := s.GetInfraConfig("CLICKHOUSE_URL", os.Getenv("CLICKHOUSE_URL"))
+	if clickhouseURL != "" {
+		chQuery := "TRUNCATE TABLE kubetrace.spans;"
+		chReq, err := http.NewRequestWithContext(ctx, "POST", clickhouseURL, strings.NewReader(chQuery))
+		if err == nil {
+			if chReq.URL.User != nil {
+				pass, _ := chReq.URL.User.Password()
+				chReq.SetBasicAuth(chReq.URL.User.Username(), pass)
+			}
+			chClient := &http.Client{Timeout: 10 * time.Second}
+			chResp, err := chClient.Do(chReq)
+			if err == nil {
+				if chResp.StatusCode == http.StatusOK {
+					log.Printf("[Sync] Successfully truncated ClickHouse spans table.")
+				} else {
+					body, _ := io.ReadAll(chResp.Body)
+					log.Printf("[Sync] ClickHouse truncation failed (status %d): %s", chResp.StatusCode, string(body))
+				}
+				chResp.Body.Close()
+			} else {
+				log.Printf("[Sync] Error executing ClickHouse truncation request: %v", err)
+			}
+		}
+	}
+
+	return count, nil
 }

@@ -68,6 +68,7 @@ type TraceListItem struct {
 	TraceID         string    `json:"traceId"`
 	ServiceName     string    `json:"serviceName"`
 	Namespace       string    `json:"namespace"`
+	Namespaces      []string  `json:"namespaces,omitempty"` // all namespaces the trace crosses, in flow order
 	Cluster         string    `json:"cluster,omitempty"`
 	RootName        string    `json:"rootName"`
 	StartTime       time.Time `json:"startTime"`
@@ -76,6 +77,7 @@ type TraceListItem struct {
 	HasError        bool      `json:"hasError"`
 	Services        []string  `json:"services"`
 	ThirdPartyTools []string  `json:"thirdPartyTools,omitempty"`
+	ServiceFlow     []string  `json:"serviceFlow,omitempty"`
 	ErrorType       string    `json:"errorType,omitempty"`
 	ErrorSummary    string    `json:"errorSummary,omitempty"`
 }
@@ -91,6 +93,9 @@ type ServiceStats struct {
 	P50Ms            float64   `json:"p50Ms"`
 	P95Ms            float64   `json:"p95Ms"`
 	P99Ms            float64   `json:"p99Ms"`
+	HealthScore      float64   `json:"healthScore,omitempty"`
+	Apdex            float64   `json:"apdex,omitempty"`
+	Status           string    `json:"status,omitempty"`
 	LastSeen         time.Time `json:"lastSeen"`
 	IsInfrastructure bool      `json:"isInfrastructure"`
 	Language         string    `json:"language,omitempty"`
@@ -98,15 +103,15 @@ type ServiceStats struct {
 
 // NamespaceStats holds aggregated metrics per namespace
 type NamespaceStats struct {
-	Namespace    string         `json:"namespace"`
-	Cluster      string         `json:"cluster,omitempty"`
-	TraceCount   int64          `json:"traceCount"`
-	ErrorCount   int64          `json:"errorCount"`
-	ErrorRate    float64        `json:"errorRate"`
-	AvgDurationMs float64       `json:"avgDurationMs"`
-	Services     []ServiceStats `json:"services"`
-	PodCount     int            `json:"podCount"`
-	LastActivity time.Time      `json:"lastActivity"`
+	Namespace     string         `json:"namespace"`
+	Cluster       string         `json:"cluster,omitempty"`
+	TraceCount    int64          `json:"traceCount"`
+	ErrorCount    int64          `json:"errorCount"`
+	ErrorRate     float64        `json:"errorRate"`
+	AvgDurationMs float64        `json:"avgDurationMs"`
+	Services      []ServiceStats `json:"services"`
+	PodCount      int            `json:"podCount"`
+	LastActivity  time.Time      `json:"lastActivity"`
 }
 
 // ServiceEdge represents a dependency between two services
@@ -142,6 +147,18 @@ type SearchQuery struct {
 	EndTime       time.Time `json:"endTime"`
 	Limit         int       `json:"limit"`
 	Offset        int       `json:"offset"`
+}
+
+// EndpointStat is a stable per-endpoint (root service + root operation)
+// aggregation over the whole query window, used by the Traces "Top traces"
+// view so counts and latencies don't jitter between refreshes.
+type EndpointStat struct {
+	ServiceName   string  `json:"serviceName"`
+	OperationName string  `json:"operationName"`
+	Count         int64   `json:"count"`
+	ErrorCount    int64   `json:"errorCount"`
+	AvgDurationMs float64 `json:"avgDurationMs"`
+	P95DurationMs float64 `json:"p95DurationMs"`
 }
 
 // LiveSpan is sent over WebSocket for real-time streaming
