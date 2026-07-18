@@ -25,6 +25,10 @@ const (
 
 	// Window used for service statistics aggregation.
 	chStatsWindow = time.Hour
+
+	// When retention is unlimited, keep default queries bounded unless the UI
+	// sends an explicit startTime. This keeps "forever" storage cheap to operate.
+	chDefaultForeverQueryHours = 168
 )
 
 var chHTTPClient = &http.Client{
@@ -171,6 +175,33 @@ func chTraceIDPredicate(traceID string) string {
 		return fmt.Sprintf("trace_id = '%s'", chEscape(strings.ToLower(traceID)))
 	}
 	return fmt.Sprintf("positionCaseInsensitive(trace_id, '%s') > 0", chEscape(traceID))
+}
+
+func (s *Store) chQueryBounds(q *models.SearchQuery, now time.Time) (time.Time, time.Time) {
+	end := q.EndTime
+	if end.IsZero() {
+		end = now.Add(5 * time.Minute)
+	}
+
+	start := q.StartTime
+	retentionHours := s.GetRetentionHours()
+	if retentionHours > 0 {
+		cutoff := now.Add(-time.Duration(retentionHours) * time.Hour)
+		if start.IsZero() || start.Before(cutoff) {
+			start = cutoff
+		}
+	} else if start.IsZero() {
+		hours := getEnvInt("KUBETRACE_DEFAULT_QUERY_HOURS", chDefaultForeverQueryHours)
+		if hours <= 0 {
+			hours = chDefaultForeverQueryHours
+		}
+		start = now.Add(-time.Duration(hours) * time.Hour)
+	}
+
+	if start.After(end) {
+		start = end
+	}
+	return start.UTC(), end.UTC()
 }
 
 func isHexString(value string) bool {
@@ -391,14 +422,7 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	start := q.StartTime
-	if start.IsZero() {
-		start = time.Now().Add(-168 * time.Hour)
-	}
-	end := q.EndTime
-	if end.IsZero() {
-		end = time.Now().Add(5 * time.Minute)
-	}
+	start, end := s.chQueryBounds(q, time.Now())
 
 	where := []string{
 		fmt.Sprintf("timestamp >= toDateTime64('%s', 6)", start.UTC().Format(chTimeLayout)),
@@ -490,12 +514,14 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 		quoted = append(quoted, "'"+chEscape(id)+"'")
 	}
 
-	// Fetch the spans of the selected traces (slightly widened window so
-	// spans that started just before the search window are included).
+	// Fetch the spans of the selected traces, bounded to the query window plus
+	// a small edge cushion so long root/child timing skew is still represented.
 	spansQuery := fmt.Sprintf(`SELECT %s
 	FROM kubetrace.spans
-	WHERE trace_id IN (%s) AND timestamp >= toDateTime64('%s', 6) - INTERVAL 10 MINUTE
-	LIMIT 100000`, chSpanColumns, strings.Join(quoted, ","), start.UTC().Format(chTimeLayout))
+	WHERE trace_id IN (%s)
+		AND timestamp >= toDateTime64('%s', 6) - INTERVAL 10 MINUTE
+		AND timestamp <= toDateTime64('%s', 6) + INTERVAL 10 MINUTE
+	LIMIT 100000`, chSpanColumns, strings.Join(quoted, ","), start.UTC().Format(chTimeLayout), end.UTC().Format(chTimeLayout))
 
 	spanRows, err := s.chQuery(ctx, spansQuery)
 	if err != nil {
@@ -522,15 +548,8 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 // chEndpointFilters builds the trace-level WHERE and HAVING clauses shared by
 // the trace search and the endpoint aggregation, so both apply identical
 // filtering semantics.
-func chEndpointFilters(q *models.SearchQuery) (where []string, having []string, start time.Time, end time.Time) {
-	start = q.StartTime
-	if start.IsZero() {
-		start = time.Now().Add(-168 * time.Hour)
-	}
-	end = q.EndTime
-	if end.IsZero() {
-		end = time.Now().Add(5 * time.Minute)
-	}
+func (s *Store) chEndpointFilters(q *models.SearchQuery) (where []string, having []string, start time.Time, end time.Time) {
+	start, end = s.chQueryBounds(q, time.Now())
 
 	where = []string{
 		fmt.Sprintf("timestamp >= toDateTime64('%s', 6)", start.UTC().Format(chTimeLayout)),
@@ -602,7 +621,7 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	where, having, _, _ := chEndpointFilters(q)
+	where, having, _, _ := s.chEndpointFilters(q)
 
 	// Exclude spans from namespaces that have been disabled in the Namespace
 	// Manager, so their endpoints never surface in the aggregation.
