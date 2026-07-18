@@ -165,6 +165,24 @@ func chEscape(v string) string {
 	return v
 }
 
+func chTraceIDPredicate(traceID string) string {
+	traceID = strings.TrimSpace(traceID)
+	if len(traceID) == 32 && isHexString(traceID) {
+		return fmt.Sprintf("trace_id = '%s'", chEscape(strings.ToLower(traceID)))
+	}
+	return fmt.Sprintf("positionCaseInsensitive(trace_id, '%s') > 0", chEscape(traceID))
+}
+
+func isHexString(value string) bool {
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return value != ""
+}
+
 func chString(v any) string {
 	s, _ := v.(string)
 	return s
@@ -387,7 +405,7 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 		fmt.Sprintf("timestamp <= toDateTime64('%s', 6)", end.UTC().Format(chTimeLayout)),
 	}
 	if q.TraceID != "" {
-		where = append(where, fmt.Sprintf("positionCaseInsensitive(trace_id, '%s') > 0", chEscape(q.TraceID)))
+		where = append(where, chTraceIDPredicate(q.TraceID))
 	}
 
 	var having []string
@@ -519,7 +537,7 @@ func chEndpointFilters(q *models.SearchQuery) (where []string, having []string, 
 		fmt.Sprintf("timestamp <= toDateTime64('%s', 6)", end.UTC().Format(chTimeLayout)),
 	}
 	if q.TraceID != "" {
-		where = append(where, fmt.Sprintf("positionCaseInsensitive(trace_id, '%s') > 0", chEscape(q.TraceID)))
+		where = append(where, chTraceIDPredicate(q.TraceID))
 	}
 
 	if q.Namespace != "" {

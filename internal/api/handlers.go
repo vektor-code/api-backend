@@ -21,29 +21,44 @@ import (
 )
 
 type wsClient struct {
-	ns string
-	mu sync.Mutex
+	conn      *websocket.Conn
+	ns        string
+	send      chan []byte
+	closeOnce sync.Once
 }
 
 // Hub manages WebSocket live-stream connections
 type Hub struct {
-	clients map[*websocket.Conn]*wsClient // conn -> client state
+	clients map[*wsClient]struct{}
 	mu      sync.RWMutex
 }
 
 func newHub() *Hub {
-	return &Hub{clients: make(map[*websocket.Conn]*wsClient)}
+	return &Hub{clients: make(map[*wsClient]struct{})}
 }
 
-func (h *Hub) register(c *websocket.Conn, ns string) {
+func (h *Hub) register(c *websocket.Conn, ns string) *wsClient {
+	cl := &wsClient{
+		conn: c,
+		ns:   ns,
+		send: make(chan []byte, 256),
+	}
 	h.mu.Lock()
-	h.clients[c] = &wsClient{ns: ns}
+	h.clients[cl] = struct{}{}
 	h.mu.Unlock()
+	go h.writeLoop(cl)
+	return cl
 }
 
-func (h *Hub) unregister(c *websocket.Conn) {
+func (h *Hub) unregister(cl *wsClient) {
 	h.mu.Lock()
-	delete(h.clients, c)
+	if _, ok := h.clients[cl]; ok {
+		delete(h.clients, cl)
+		cl.closeOnce.Do(func() {
+			close(cl.send)
+			_ = cl.conn.Close()
+		})
+	}
 	h.mu.Unlock()
 }
 
@@ -52,25 +67,33 @@ func (h *Hub) broadcast(span *models.Span) {
 	data, _ := json.Marshal(msg)
 
 	h.mu.RLock()
-	type target struct {
-		conn *websocket.Conn
-		cl   *wsClient
-	}
-	var targets []target
-	for conn, cl := range h.clients {
+	var slow []*wsClient
+	for cl := range h.clients {
 		if cl.ns != "" && cl.ns != span.Namespace {
 			continue
 		}
-		targets = append(targets, target{conn: conn, cl: cl})
+		select {
+		case cl.send <- data:
+		default:
+			slow = append(slow, cl)
+		}
 	}
 	h.mu.RUnlock()
 
-	for _, t := range targets {
-		t.cl.mu.Lock()
-		if err := t.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	for _, cl := range slow {
+		log.Printf("[ws] disconnecting slow live-stream client namespace=%s", cl.ns)
+		h.unregister(cl)
+	}
+}
+
+func (h *Hub) writeLoop(cl *wsClient) {
+	for data := range cl.send {
+		_ = cl.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := cl.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 			log.Printf("[ws] write error: %v", err)
+			h.unregister(cl)
+			return
 		}
-		t.cl.mu.Unlock()
 	}
 }
 
@@ -733,11 +756,12 @@ func randString(n int) string {
 func (h *Handler) LiveStream(c *websocket.Conn) {
 	ns := c.Query("namespace", "")
 
-	// Send initial ping before registering to prevent concurrent write during handshake/setup
-	_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"connected","message":"KubeTrace live stream ready"}`))
-
-	h.hub.register(c, ns)
-	defer h.hub.unregister(c)
+	cl := h.hub.register(c, ns)
+	defer h.hub.unregister(cl)
+	select {
+	case cl.send <- []byte(`{"type":"connected","message":"live stream ready"}`):
+	default:
+	}
 
 	// Keep alive / read loop
 	for {

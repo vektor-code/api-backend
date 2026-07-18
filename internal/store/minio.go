@@ -32,39 +32,39 @@ type Store struct {
 	tracesMu     sync.RWMutex
 
 	// Pre-computed service map cache (rebuilt on syncState, served directly on API calls)
-	serviceMapCache    map[string]*models.ServiceMapData // key = namespace ("" = all)
-	serviceMapMu       sync.RWMutex
-	serviceMapVersion  int64 // incremented when cache is invalidated
+	serviceMapCache   map[string]*models.ServiceMapData // key = namespace ("" = all)
+	serviceMapMu      sync.RWMutex
+	serviceMapVersion int64 // incremented when cache is invalidated
 
 	// Local caches (collected by this pod instance only)
-	localStats   map[string]*models.ServiceStats
-	localTraces  map[string]*models.Trace
-	localMu      sync.RWMutex
+	localStats  map[string]*models.ServiceStats
+	localTraces map[string]*models.Trace
+	localMu     sync.RWMutex
 
 	// Background upload queue to throttle MinIO writes and prevent CPU iowait
-	uploadChan   chan uploadTask
+	uploadChan chan uploadTask
 
 	detectedClusters map[string]bool
 	clustersMu       sync.RWMutex
 
-	disabledNamespaces map[string]bool
+	disabledNamespaces   map[string]bool
 	disabledNamespacesMu sync.RWMutex
 
 	// Postgres opt-in cache: namespace -> explicitly_enabled, refreshed by
 	// LoadDisabledNamespaces. Guarded by disabledNamespacesMu.
 	explicitlyEnabledNs map[string]bool
 
-	configuredNamespaces map[string]bool
+	configuredNamespaces   map[string]bool
 	configuredNamespacesMu sync.RWMutex
 
-	reportedPods     map[string][]ReportedPod
-	reportedPodsMu   sync.RWMutex
+	reportedPods   map[string][]ReportedPod
+	reportedPodsMu sync.RWMutex
 
 	db              *sql.DB
 	postgresEnabled bool
 
-	retentionHours  int
-	retentionMu     sync.RWMutex
+	retentionHours int
+	retentionMu    sync.RWMutex
 
 	maxTraces int // max number of traces to keep in memory
 
@@ -119,16 +119,16 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 	}
 
 	s := &Store{
-		client:           client,
-		bucketName:       bucket,
-		statsCache:       make(map[string]*models.ServiceStats),
-		recentTraces:     make(map[string]*models.Trace),
-		serviceMapCache:  make(map[string]*models.ServiceMapData),
-		localStats:         make(map[string]*models.ServiceStats),
-		localTraces:        make(map[string]*models.Trace),
-		uploadChan:         make(chan uploadTask, 50000),
-		detectedClusters:   make(map[string]bool),
-		disabledNamespaces: make(map[string]bool),
+		client:               client,
+		bucketName:           bucket,
+		statsCache:           make(map[string]*models.ServiceStats),
+		recentTraces:         make(map[string]*models.Trace),
+		serviceMapCache:      make(map[string]*models.ServiceMapData),
+		localStats:           make(map[string]*models.ServiceStats),
+		localTraces:          make(map[string]*models.Trace),
+		uploadChan:           make(chan uploadTask, 50000),
+		detectedClusters:     make(map[string]bool),
+		disabledNamespaces:   make(map[string]bool),
 		configuredNamespaces: make(map[string]bool),
 		retentionHours:       defaultRetentionHours,
 		maxTraces:            5000,
@@ -194,6 +194,11 @@ func getEnvInt(key string, def int) int {
 
 // Close shuts down the store
 func (s *Store) Close() error {
+	if s.producer != nil {
+		if err := s.producer.Close(); err != nil {
+			log.Printf("[kafka] producer close failed: %v", err)
+		}
+	}
 	if s.postgresEnabled && s.db != nil {
 		return s.db.Close()
 	}
@@ -246,7 +251,7 @@ func (s *Store) uploadWorker() {
 			ContentType: task.contentType,
 		})
 		cancel()
-		
+
 		// Adaptive throttling: if queue is backed up, skip sleep to avoid drops
 		if len(s.uploadChan) < 1000 {
 			time.Sleep(5 * time.Millisecond)
@@ -671,7 +676,7 @@ func (s *Store) DeleteConfiguredNamespace(ns string) error {
 	s.configuredNamespacesMu.Lock()
 	delete(s.configuredNamespaces, ns)
 	s.configuredNamespacesMu.Unlock()
-	
+
 	// Also remove it from disabled list to clean up
 	s.disabledNamespacesMu.Lock()
 	delete(s.disabledNamespaces, ns)
@@ -876,4 +881,3 @@ func (s *Store) pruneStaleClusterInventory(list []ClusterInventoryItem) error {
 	}
 	return s.SaveClusterInventory(filtered)
 }
-
