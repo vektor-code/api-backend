@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -23,9 +24,9 @@ type SpanHandler func(span *models.Span)
 
 // Receiver handles OTLP/HTTP trace ingestion
 type Receiver struct {
-	store      *store.Store
-	sampler    *AdaptiveSampler
-	onSpan     SpanHandler
+	store   *store.Store
+	sampler *AdaptiveSampler
+	onSpan  SpanHandler
 }
 
 // NewReceiver creates a new OTLP HTTP receiver
@@ -118,7 +119,7 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 					}
 				}
 				isError := span.Status == models.SpanStatusError
-				if r.sampler != nil && !r.sampler.ShouldSample(span.TraceID, isError) {
+				if !r.applySampling(span, isError) {
 					continue
 				}
 				if err := r.store.SaveSpan(span); err != nil {
@@ -136,7 +137,13 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.Span {
 	startTime := time.Unix(0, int64(pb.StartTimeUnixNano))
 	endTime := time.Unix(0, int64(pb.EndTimeUnixNano))
-	durationMs := float64(pb.EndTimeUnixNano-pb.StartTimeUnixNano) / 1e6
+	// Unsigned subtraction underflows when end <= start (clock skew, or an
+	// unfinished span with end=0), producing a ~1.8e10 ms outlier that inflates
+	// every latency percentile. Clamp to zero instead.
+	var durationMs float64
+	if pb.EndTimeUnixNano > pb.StartTimeUnixNano {
+		durationMs = float64(pb.EndTimeUnixNano-pb.StartTimeUnixNano) / 1e6
+	}
 
 	status := models.SpanStatusUnset
 	if pb.Status != nil {
@@ -244,7 +251,7 @@ func (r *Receiver) IngestJSON(c *fiber.Ctx) error {
 			sp.EndTime = sp.StartTime.Add(time.Duration(sp.DurationMs) * time.Millisecond)
 		}
 		isError := sp.Status == models.SpanStatusError
-		if r.sampler != nil && !r.sampler.ShouldSample(sp.TraceID, isError) {
+		if !r.applySampling(sp, isError) {
 			continue
 		}
 		if err := r.store.SaveSpan(sp); err != nil {
@@ -260,4 +267,29 @@ func (r *Receiver) IngestJSON(c *fiber.Ctx) error {
 // ProbeHTTP is a simple liveness probe for the collector
 func ProbeHTTP(w http.ResponseWriter, _ *http.Request) {
 	io.WriteString(w, "ok")
+}
+
+// applySampling decides whether to keep a span and, when it survives a
+// probabilistic decision, records the weight it carries.
+//
+// Recording the weight is what makes counts honest. Under load the adaptive
+// sampler drops to as little as 1%, and without this every "calls" figure
+// derived from stored spans would under-report by up to 100x with nothing on
+// screen to say so.
+func (r *Receiver) applySampling(span *models.Span, isError bool) bool {
+	if r.sampler == nil {
+		return true
+	}
+	decision := r.sampler.Sample(span.TraceID, isError)
+	if !decision.Keep {
+		return false
+	}
+	if decision.AdjustedCount > 1 {
+		if span.Attributes == nil {
+			span.Attributes = make(map[string]string)
+		}
+		span.Attributes[AttrSampleProbability] = strconv.FormatFloat(decision.Probability, 'g', 6, 64)
+		span.Attributes[AttrAdjustedCount] = strconv.FormatFloat(decision.AdjustedCount, 'g', 6, 64)
+	}
+	return true
 }

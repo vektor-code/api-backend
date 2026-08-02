@@ -83,5 +83,7 @@ func (s *Store) GetAgentNamespaceForCluster(clusterID string) string {
 			return info.AgentNamespace
 		}
 	}
-	return "trace-prod"
+	// Empty signals "unknown" so the caller falls back to dynamic discovery
+	// rather than a hardcoded namespace.
+	return ""
 }

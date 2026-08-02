@@ -35,7 +35,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	// REST API
 	api := app.Group("/api", AuthMiddleware())
 	api.Get("/health", h.Health)
-	
+
 	// Auth routes
 	api.Post("/auth/login", h.LoginHandler)
 	api.Get("/auth/me", h.GetMeHandler)
@@ -48,6 +48,8 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/traces/:id/diagnostics", h.GetTraceDiagnostics)
 	api.Get("/metrics/database", h.GetDatabaseMetrics)
 	api.Get("/metrics/timeseries", h.GetTimeseries)
+	api.Get("/metrics/latency-distribution", h.GetLatencyDistribution)
+	api.Get("/metrics/infrastructure", h.GetInfrastructureMetrics)
 	api.Get("/services", h.GetServices)
 	api.Get("/servicemap", h.GetServiceMap)
 	api.Get("/pods", h.GetPods)

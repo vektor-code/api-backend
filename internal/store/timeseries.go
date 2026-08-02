@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/spanenrich"
 )
 
 // TimeseriesBucket is one interval of aggregated telemetry for dashboards.
@@ -93,8 +94,8 @@ func (s *Store) chTimeseries(result *TimeseriesData, bucketIdx map[int64]int, na
 		countIf(status_code = 'ERROR') AS errors,
 		avg(duration_ns) / 1e6 AS avg_ms,
 		quantile(0.99)(duration_ns) / 1e6 AS p99_ms,
-		countIf(tags['db.system'] != '') AS db_calls,
-		coalesce(avgIf(duration_ns, tags['db.system'] != '') / 1e6, 0) AS db_avg_ms
+		countIf(dep_kind IN ('database', 'cache')) AS db_calls,
+		coalesce(avgIf(duration_ns, dep_kind IN ('database', 'cache')) / 1e6, 0) AS db_avg_ms
 	FROM kubetrace.spans WHERE %s GROUP BY b ORDER BY b`, step, cond))
 	if err != nil {
 		return nil, err
@@ -220,7 +221,9 @@ func (s *Store) memTimeseries(result *TimeseriesData, bucketIdx map[int64]int, n
 			}
 			durSums[idx] += sp.DurationMs
 			durations[idx] = append(durations[idx], sp.DurationMs)
-			if sp.Attributes["db.system"] != "" {
+			// Match the ClickHouse path: gateways and secret stores are
+			// dependencies, but they are not database calls.
+			if kind := sp.Attributes[spanenrich.TagKind]; kind == "database" || kind == "cache" {
 				bkt.DbCalls++
 				dbDurSums[idx] += sp.DurationMs
 			}

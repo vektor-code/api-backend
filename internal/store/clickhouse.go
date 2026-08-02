@@ -23,6 +23,13 @@ const (
 	chRefreshWindow    = 15 * time.Minute
 	chRefreshSpanLimit = 20000
 
+	// Floor for the per-namespace share of that budget. A plain
+	// "newest 20000 spans" cap allocates the cache by traffic volume, so a
+	// busy namespace crowds quiet ones out entirely — at 88k spans per window
+	// a low-volume namespace received well under 1% of the cache and rendered
+	// as empty in the service map. Every namespace now gets its own slice.
+	chRefreshMinPerNamespace = 250
+
 	// Window used for service statistics aggregation.
 	chStatsWindow = time.Hour
 
@@ -175,6 +182,16 @@ func chTraceIDPredicate(traceID string) string {
 		return fmt.Sprintf("trace_id = '%s'", chEscape(strings.ToLower(traceID)))
 	}
 	return fmt.Sprintf("positionCaseInsensitive(trace_id, '%s') > 0", chEscape(traceID))
+}
+
+const chRootSpanPredicate = "parent_span_id = '' OR match(parent_span_id, '^0+$')"
+
+func chRootTransactionNameExpr() string {
+	return fmt.Sprintf("anyIf(if(transaction_name != '', transaction_name, operation_name), %s)", chRootSpanPredicate)
+}
+
+func chOperationHaving(operation string) string {
+	return fmt.Sprintf("positionCaseInsensitive(%s, '%s') > 0", chRootTransactionNameExpr(), chEscape(operation))
 }
 
 func (s *Store) chQueryBounds(q *models.SearchQuery, now time.Time) (time.Time, time.Time) {
@@ -377,11 +394,25 @@ func (s *Store) refreshFromClickHouse() {
 	}
 
 	// 2. Recent spans for the service map / pod discovery caches (bounded).
+	//
+	// The budget is divided between the namespaces actually reporting, using
+	// LIMIT ... BY, so the cache represents every namespace rather than
+	// whichever few produce the most traffic. namespaceCount comes from the
+	// stats query above, which has no cap.
+	perNamespace := chRefreshSpanLimit
+	if namespaceCount := countNamespaces(newStats); namespaceCount > 1 {
+		perNamespace = chRefreshSpanLimit / namespaceCount
+		if perNamespace < chRefreshMinPerNamespace {
+			perNamespace = chRefreshMinPerNamespace
+		}
+	}
+
 	spansQuery := fmt.Sprintf(`SELECT %s
 	FROM kubetrace.spans
 	WHERE timestamp > now64(6) - INTERVAL %d SECOND
 	ORDER BY timestamp DESC
-	LIMIT %d`, chSpanColumns, int(chRefreshWindow.Seconds()), chRefreshSpanLimit)
+	LIMIT %d BY namespace
+	LIMIT %d`, chSpanColumns, int(chRefreshWindow.Seconds()), perNamespace, chRefreshSpanLimit*2)
 
 	spanRows, err := s.chQuery(ctx, spansQuery)
 	if err != nil {
@@ -470,9 +501,7 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 		}
 	}
 	if q.Operation != "" {
-		having = append(having, fmt.Sprintf(
-			"positionCaseInsensitive(anyIf(operation_name, parent_span_id = '' OR match(parent_span_id, '^0+$')), '%s') > 0",
-			chEscape(q.Operation)))
+		having = append(having, chOperationHaving(q.Operation))
 	}
 	if q.MinSpans > 0 {
 		having = append(having, fmt.Sprintf("count() >= %d", q.MinSpans))
@@ -596,9 +625,7 @@ func (s *Store) chEndpointFilters(q *models.SearchQuery) (where []string, having
 		}
 	}
 	if q.Operation != "" {
-		having = append(having, fmt.Sprintf(
-			"positionCaseInsensitive(anyIf(operation_name, parent_span_id = '' OR match(parent_span_id, '^0+$')), '%s') > 0",
-			chEscape(q.Operation)))
+		having = append(having, chOperationHaving(q.Operation))
 	}
 	if q.MinSpans > 0 {
 		having = append(having, fmt.Sprintf("count() >= %d", q.MinSpans))
@@ -640,29 +667,39 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 		limit = 500
 	}
 
-	const rootPred = "parent_span_id = '' OR match(parent_span_id, '^0+$')"
+	// transaction_name is the aggregation key, falling back to operation_name
+	// for spans written before that column existed. Grouping on the raw span
+	// name merged every endpoint of a service that names its server spans
+	// after the bare HTTP method into one row.
 	inner := fmt.Sprintf(`SELECT
 		anyIf(service_name, %s) AS root_service,
-		anyIf(operation_name, %s) AS root_op,
+		anyIf(namespace, %s) AS root_namespace,
+		anyIf(if(transaction_name != '', transaction_name, operation_name), %s) AS root_op,
 		(max(toUnixTimestamp64Milli(timestamp) + intDiv(duration_ns, 1000000)) - min(toUnixTimestamp64Milli(timestamp))) AS dur_ms,
-		countIf(status_code = 'ERROR') > 0 AS has_error
+		countIf(status_code = 'ERROR') > 0 AS has_error,
+		maxIf(sample_weight, %s) AS weight
 	FROM kubetrace.spans
 	WHERE %s
-	GROUP BY trace_id`, rootPred, rootPred, strings.Join(where, " AND "))
+	GROUP BY trace_id`, chRootSpanPredicate, chRootSpanPredicate, chRootSpanPredicate, chRootSpanPredicate, strings.Join(where, " AND "))
 	if len(having) > 0 {
 		inner += "\n\tHAVING " + strings.Join(having, " AND ")
 	}
 
+	// Counts are weighted by the sampling factor, so they describe traffic
+	// rather than what happened to survive sampling. Latency percentiles are
+	// unweighted: each stored trace is one observation of the distribution.
 	query := fmt.Sprintf(`SELECT
 		root_service AS service_name,
+		root_namespace AS namespace,
 		root_op AS operation_name,
-		count() AS cnt,
-		countIf(has_error) AS err_cnt,
+		toInt64(round(sum(greatest(weight, 1)))) AS cnt,
+		toInt64(round(sumIf(greatest(weight, 1), has_error))) AS err_cnt,
 		avg(dur_ms) AS avg_ms,
-		quantile(0.95)(dur_ms) AS p95_ms
+		quantile(0.95)(dur_ms) AS p95_ms,
+		count() AS sampled_cnt
 	FROM (%s)
 	WHERE root_service != ''
-	GROUP BY service_name, operation_name
+	GROUP BY service_name, namespace, operation_name
 	ORDER BY (avg_ms * cnt) DESC
 	LIMIT %d`, inner, limit)
 
@@ -675,11 +712,13 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 	for _, row := range rows {
 		out = append(out, &models.EndpointStat{
 			ServiceName:   chString(row["service_name"]),
+			Namespace:     chString(row["namespace"]),
 			OperationName: chString(row["operation_name"]),
 			Count:         chInt(row["cnt"]),
 			ErrorCount:    chInt(row["err_cnt"]),
 			AvgDurationMs: chFloat(row["avg_ms"]),
 			P95DurationMs: chFloat(row["p95_ms"]),
+			SampledCount:  chInt(row["sampled_cnt"]),
 		})
 	}
 	return out, nil
@@ -717,4 +756,29 @@ func (s *Store) chGetTrace(traceID string) (*models.Trace, error) {
 	sort.Slice(spans, func(i, j int) bool { return spans[i].StartTime.Before(spans[j].StartTime) })
 
 	return buildTrace(traceID, spans), nil
+}
+
+// chStringSlice converts a ClickHouse array column into a string slice.
+func chStringSlice(v any) []string {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s := chString(item); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// countNamespaces counts the distinct namespaces present in a stats map keyed
+// by "namespace:service".
+func countNamespaces(stats map[string]*models.ServiceStats) int {
+	seen := make(map[string]struct{}, len(stats))
+	for _, stat := range stats {
+		seen[stat.Namespace] = struct{}{}
+	}
+	return len(seen)
 }

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/connstr"
+	"github.com/kubetrace/shared/spanenrich"
 )
 
 // SaveSpan enriches a span and hands it to the active storage pipeline:
@@ -53,365 +55,60 @@ func (s *Store) SaveSpan(span *models.Span) error {
 	return nil
 }
 
-// enrichSpanMetadata fills in missing metadata like db.system for uninstrumented databases
+// enrichSpanMetadata attaches the Kubernetes context only this service has, then
+// hands the span to the shared enrichment pipeline.
+//
+// The classification that used to live here — several hundred lines of port
+// tables, substring tests and SQL-dialect sniffing — was one of four
+// independent copies, and it iterated the attribute map, so its answer varied
+// with Go's map ordering. It now lives in github.com/kubetrace/shared, which
+// the ingestor runs too.
 func (s *Store) enrichSpanMetadata(span *models.Span) {
 	if span == nil {
-		return
-	}
-	if span.Attributes != nil && span.Attributes["__vektor_enriched__"] == "true" {
 		return
 	}
 	if span.Attributes == nil {
 		span.Attributes = make(map[string]string)
 	}
-	span.Attributes["__vektor_enriched__"] = "true"
 
-	// Try to resolve/extract database metadata from Kubernetes pod details
-	if span.PodName != "" && span.Namespace != "" {
-		pods := s.GetReportedPods(span.Namespace)
-		for _, pod := range pods {
-			if pod.Name == span.PodName {
-				if span.Attributes["db.name"] == "" && pod.DatabaseName != "" {
-					span.Attributes["db.name"] = pod.DatabaseName
-				}
-				if span.Attributes["net.peer.name"] == "" && span.Attributes["server.address"] == "" && pod.DatabaseHost != "" {
-					span.Attributes["server.address"] = pod.DatabaseHost
-				}
-				if span.Attributes["net.peer.port"] == "" && span.Attributes["server.port"] == "" && pod.DatabasePort != "" {
-					span.Attributes["server.port"] = pod.DatabasePort
-				}
-				break
-			}
-		}
-	}
+	s.applyPodDatabaseHints(span)
 
-	// Try to resolve/extract database name if missing or generic
-	if dbName := parseDbNameFromAttributes(s, span); dbName != "" {
+	// The reported-pod fallback resolves a database name that the
+	// instrumentation left blank or generic, using what the agent observed in
+	// the pod's environment.
+	if dbName := s.resolveDatabaseName(span); dbName != "" {
 		span.Attributes["db.name"] = dbName
 	}
 
-	// Only process CLIENT, PRODUCER, and CONSUMER spans
-	isValidKind := span.Kind == models.SpanKindClient || span.Kind == "CLIENT" ||
-		span.Kind == models.SpanKindProducer || span.Kind == "PRODUCER" ||
-		span.Kind == models.SpanKindConsumer || span.Kind == "CONSUMER"
-	if !isValidKind {
-		return
-	}
+	result := s.enricher.Enrich(span.Attributes, span.Name, string(span.Kind))
 
-	// 1. Identify target addresses, service name, and ports
-	peerName := strings.ToLower(span.Attributes["net.peer.name"])
-	if peerName == "" {
-		peerName = strings.ToLower(span.Attributes["server.address"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(span.Attributes["peer.service"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(span.Attributes["net.peer.ip"])
-	}
-	if peerName == "" {
-		peerName = strings.ToLower(span.Attributes["network.peer.address"])
-	}
-
-	portStr := span.Attributes["server.port"]
-	if portStr == "" {
-		portStr = span.Attributes["net.peer.port"]
-	}
-	if portStr == "" {
-		portStr = span.Attributes["peer.port"]
-	}
-
-	inferredSystem := ""
-	isDb := false
-	isMsg := false
-
-	// 2. Scan all span attributes to find explicit or implicit hints
-	for k, v := range span.Attributes {
-		valLower := strings.ToLower(v)
-		keyLower := strings.ToLower(k)
-
-		if keyLower == "db.system" && valLower != "" && valLower != "unknown" {
-			inferredSystem = valLower
-			isDb = true
-			break
-		}
-		if keyLower == "messaging.system" && valLower != "" && valLower != "unknown" {
-			if valLower == "message_bus" {
-				inferredSystem = "rabbitmq"
-			} else {
-				inferredSystem = valLower
-			}
-			isMsg = true
-			break
-		}
-
-		// Check for connection string or identifier patterns
-		if strings.Contains(valLower, "redis://") || strings.Contains(valLower, "redis-") || valLower == "redis" {
-			inferredSystem = "redis"
-			isDb = true
-		}
-		if strings.Contains(valLower, "kafka") || strings.Contains(valLower, "broker-") {
-			inferredSystem = "kafka"
-			isMsg = true
-		}
-		if strings.Contains(valLower, "rabbitmq") || strings.Contains(valLower, "amqp://") || strings.Contains(valLower, "amqps://") {
-			inferredSystem = "rabbitmq"
-			isMsg = true
-		}
-		if strings.Contains(valLower, "minio") || strings.Contains(valLower, "s3.amazonaws") {
-			inferredSystem = "minio"
-			isDb = true
-		}
-		if strings.Contains(valLower, "apm") {
-			inferredSystem = "apm"
-			isDb = true
-		}
-		if inferredSystem == "" && strings.Contains(valLower, "vault") {
-			inferredSystem = "vault"
-			isDb = true
-		}
-		if strings.Contains(valLower, "clickhouse") {
-			inferredSystem = "clickhouse"
-			isDb = true
-		}
-		if strings.Contains(valLower, "liquibase") {
-			inferredSystem = "liquibase"
-			isDb = true
-		}
-		if strings.Contains(valLower, "nginx") {
-			inferredSystem = "nginx"
-			isDb = true
-		}
-		if strings.Contains(valLower, "kong") {
-			inferredSystem = "kong"
-			isDb = true
-		}
-	}
-
-	// 2b. Hostname-based disambiguation — resolves conflicts where different
-	// services share the same port (e.g. APM Server and Vault both use 8200).
-	if inferredSystem == "" && peerName != "" {
-		if strings.Contains(peerName, "apm") {
-			inferredSystem = "apm"
-			isDb = true
-		}
-	}
-
-	// 3. Port-based inference (including SSL / custom ports)
-	if inferredSystem == "" && portStr != "" {
-		switch portStr {
-		case "5432", "5433":
-			inferredSystem = "postgresql"
-			isDb = true
-		case "3306", "33060":
-			inferredSystem = "mysql"
-			isDb = true
-		case "6379", "6380":
-			inferredSystem = "redis"
-			isDb = true
-		case "27017", "27018":
-			inferredSystem = "mongodb"
-			isDb = true
-		case "9092", "9093", "9094", "29092", "39092":
-			inferredSystem = "kafka"
-			isMsg = true
-		case "5671", "5672", "15672", "15671":
-			inferredSystem = "rabbitmq"
-			isMsg = true
-		case "1433":
-			inferredSystem = "mssql"
-			isDb = true
-		case "1521":
-			inferredSystem = "oracle"
-			isDb = true
-		case "9200", "9300":
-			inferredSystem = "elasticsearch"
-			isDb = true
-		case "8200", "8201":
-			// Disambiguate: APM servers also commonly use port 8200
-			if strings.Contains(peerName, "apm") {
-				inferredSystem = "apm"
-			} else {
-				inferredSystem = "vault"
-			}
-			isDb = true
-		case "9000", "9001":
-			inferredSystem = "minio"
-			isDb = true
-		case "8123", "9440":
-			inferredSystem = "clickhouse"
-			isDb = true
-		case "8000", "8443", "8001", "8444":
-			inferredSystem = "kong"
-			isDb = true
-		}
-	}
-
-	// Helper to match database substrings
-	checkSubstrings := func(str string) (string, bool, bool) {
-		if str == "" {
-			return "", false, false
-		}
-		if strings.Contains(str, "postgres") || (strings.Contains(str, "pg") && !strings.Contains(str, "png") && !strings.Contains(str, "page")) {
-			return "postgresql", true, false
-		}
-		if strings.Contains(str, "redis") {
-			return "redis", true, false
-		}
-		if strings.Contains(str, "mysql") {
-			return "mysql", true, false
-		}
-		if strings.Contains(str, "mongo") {
-			return "mongodb", true, false
-		}
-		if strings.Contains(str, "oracle") {
-			return "oracle", true, false
-		}
-		if strings.Contains(str, "mssql") || strings.Contains(str, "sqlserver") {
-			return "mssql", true, false
-		}
-		if strings.Contains(str, "kafka") {
-			return "kafka", false, true
-		}
-		if strings.Contains(str, "rabbitmq") || strings.Contains(str, "amqp") {
-			return "rabbitmq", false, true
-		}
-		if strings.Contains(str, "elasticsearch") || strings.Contains(str, "elastic") {
-			return "elasticsearch", true, false
-		}
-		if strings.Contains(str, "minio") || strings.Contains(str, "s3") {
-			return "minio", true, false
-		}
-		if strings.Contains(str, "apm") {
-			return "apm", true, false
-		}
-		if strings.Contains(str, "vault") {
-			return "vault", true, false
-		}
-		if strings.Contains(str, "clickhouse") {
-			return "clickhouse", true, false
-		}
-		if strings.Contains(str, "liquibase") {
-			return "liquibase", true, false
-		}
-		if strings.Contains(str, "nginx") {
-			return "nginx", true, false
-		}
-		if strings.Contains(str, "kong") {
-			return "kong", true, false
-		}
-		if strings.Contains(str, "db") || strings.Contains(str, "database") || strings.Contains(str, "sql") {
-			return "database", true, false
-		}
-		return "", false, false
-	}
-
-	// 4. Substring-based inference from peer name / service / span name
-	if inferredSystem == "" {
-		if sys, db, msg := checkSubstrings(strings.ToLower(span.Name)); sys != "" {
-			inferredSystem = sys
-			isDb = db
-			isMsg = msg
-		}
-	}
-	if inferredSystem == "" && peerName != "" {
-		if sys, db, msg := checkSubstrings(peerName); sys != "" {
-			inferredSystem = sys
-			isDb = db
-			isMsg = msg
-		}
-	}
-
-	// 5. Redis Command Name checks (when span name is exactly a command like GET/SET)
-	if inferredSystem == "" {
-		spanNameLower := strings.ToLower(span.Name)
-		redisCmds := map[string]bool{
-			"get": true, "set": true, "del": true, "keys": true, "ping": true, "exists": true,
-			"hget": true, "hset": true, "hdel": true, "hgetall": true, "sadd": true, "srem": true,
-			"lpush": true, "rpop": true, "incr": true, "decr": true, "expire": true, "ttl": true,
-		}
-		if redisCmds[spanNameLower] {
-			// Corroborate with port, peer name, or database tags
-			if portStr == "6379" || portStr == "6380" || strings.Contains(peerName, "redis") || strings.Contains(peerName, "cache") || span.Attributes["db.name"] != "" {
-				inferredSystem = "redis"
-				isDb = true
-			}
-		}
-	}
-
-	// 6. Generic Messaging destination heuristics
-	if inferredSystem == "" {
-		_, hasMsgDest := span.Attributes["messaging.destination"]
-		if !hasMsgDest {
-			_, hasMsgDest = span.Attributes["messaging.destination.name"]
-		}
-		if !hasMsgDest {
-			_, hasMsgDest = span.Attributes["messaging.destination_name"]
-		}
-		if hasMsgDest {
-			// Refine based on broker ports or host names
-			if portStr == "9092" || portStr == "9093" || portStr == "9094" || strings.Contains(peerName, "kafka") {
-				inferredSystem = "kafka"
-				isMsg = true
-			} else if portStr == "5672" || portStr == "5671" || portStr == "15672" || strings.Contains(peerName, "rabbit") || strings.Contains(peerName, "amqp") {
-				inferredSystem = "rabbitmq"
-				isMsg = true
-			} else {
-				inferredSystem = "rabbitmq"
-				isMsg = true
-			}
-		}
-	}
-
-	// 7. Special case: explicitly check database IP addresses like the user's "10.254.5.30"
-	if inferredSystem == "" && (peerName == "10.254.5.30" || strings.Contains(peerName, "10.254.5.30")) {
-		inferredSystem = "database"
-		isDb = true
-	}
-
-	// 8. Explicit check if database attributes (like db.statement or db.name) exist
-	dbStmt := span.Attributes["db.statement"]
-	_, hasDbName := span.Attributes["db.name"]
-	if (hasDbName || dbStmt != "") && (inferredSystem == "" || inferredSystem == "database") {
-		isDb = true
-
-		// Attempt to refine generic "database" system into a specific brand using SQL syntax analysis
-		if dbStmt != "" {
-			q := strings.ToLower(dbStmt)
-
-			// postgresql patterns (type casts, double quotes around table/column names, postgres functions, pg client prefixes)
-			hasPgCast := strings.Contains(dbStmt, "::")
-			hasDoubleQuote := strings.Contains(dbStmt, `"`) && !strings.Contains(dbStmt, "`")
-			hasPgFunc := strings.Contains(q, "now()") || strings.Contains(q, "string_agg(") || strings.Contains(q, "coalesce(")
-			hasPgParams := strings.Contains(dbStmt, "$1") || strings.Contains(dbStmt, "$2")
-
-			if hasPgCast || hasPgParams || (hasDoubleQuote && (hasPgFunc || strings.Contains(q, "select ") || strings.Contains(q, "insert ") || strings.Contains(q, "update "))) {
-				inferredSystem = "postgresql"
-			} else if strings.Contains(dbStmt, "`") {
-				inferredSystem = "mysql"
-			} else if strings.Contains(dbStmt, "[") && strings.Contains(dbStmt, "]") && strings.Contains(q, "select") {
-				inferredSystem = "mssql"
-			} else if strings.Contains(q, " rownum") || strings.Contains(q, "sysdate") || strings.Contains(q, "nvl(") {
-				inferredSystem = "oracle"
-			} else if inferredSystem == "" {
-				inferredSystem = "database"
-			}
-		} else if inferredSystem == "" {
-			inferredSystem = "database"
-		}
-	}
-
-	// 9. Apply the inferred attributes
-	if isDb && inferredSystem != "" {
-		span.Attributes["db.system"] = inferredSystem
-	} else if isMsg && inferredSystem != "" {
-		span.Attributes["messaging.system"] = inferredSystem
-	}
-
-	// 10. Detect if it is a 3rd-party external call
-	if is3rdParty, toolName := s.isThirdPartySpan(span); is3rdParty {
+	if is3rdParty, toolName := s.isThirdPartySpan(span, result); is3rdParty {
 		span.Attributes["external.service"] = toolName
 		span.Attributes["external.service.is3rdparty"] = "true"
+	}
+}
+
+// applyPodDatabaseHints copies the database coordinates the agent discovered in
+// a pod's environment onto spans emitted by that pod. This is the one piece of
+// enrichment the ingestor cannot do, because it has no Kubernetes client.
+func (s *Store) applyPodDatabaseHints(span *models.Span) {
+	if span.PodName == "" || span.Namespace == "" {
+		return
+	}
+	for _, pod := range s.GetReportedPods(span.Namespace) {
+		if pod.Name != span.PodName {
+			continue
+		}
+		if span.Attributes["db.name"] == "" && pod.DatabaseName != "" {
+			span.Attributes["db.name"] = pod.DatabaseName
+		}
+		if span.Attributes["net.peer.name"] == "" && span.Attributes["server.address"] == "" && pod.DatabaseHost != "" {
+			span.Attributes["server.address"] = pod.DatabaseHost
+		}
+		if span.Attributes["net.peer.port"] == "" && span.Attributes["server.port"] == "" && pod.DatabasePort != "" {
+			span.Attributes["server.port"] = pod.DatabasePort
+		}
+		return
 	}
 }
 
@@ -698,6 +395,17 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 		}
 	}
 
+	// A trace whose true root was never stored is still worth showing. That
+	// happens routinely: a browser propagates a traceparent without exporting
+	// its own span, or the caller sits in a namespace that ingest drops. The
+	// entry span — the earliest orphan, preferring an inbound SERVER span —
+	// stands in, so the trace lists under a real operation name instead of a
+	// blank row.
+	if rootSpan == nil {
+		rootSpan = entrySpan(spans)
+		trace.Partial = rootSpan != nil
+	}
+
 	trace.RootSpan = rootSpan
 	trace.StartTime = minStart
 	trace.EndTime = maxEnd
@@ -738,248 +446,187 @@ func (s *Store) GetRecentSpans(namespace string) []*models.Span {
 	return spans
 }
 
-// parseDbNameFromAttributes resolves/extracts db name from OpenTelemetry tags
-func parseDbNameFromAttributes(s *Store, span *models.Span) string {
+// resolveDatabaseName recovers the database a span targeted when the
+// instrumentation did not name it, working from the newer and older attribute
+// spellings, then the connection string, then the statement.
+//
+// The previous version ended with a hardcoded correction for one specific
+// truncated database name at one specific site. Site-specific facts belong in
+// the reported-pod data or the dependency ruleset, not in a compiled-in
+// string replacement.
+func (s *Store) resolveDatabaseName(span *models.Span) string {
 	if span == nil || span.Attributes == nil {
 		return ""
 	}
 	attrs := span.Attributes
 
-	// 1. If db.name already exists and is non-empty, use it
-	dbName := attrs["db.name"]
+	dbName := firstAttr(attrs, "db.name", "db.namespace", "db.instance")
 
-	// 2. Try db.instance (older semantic conventions)
 	if dbName == "" {
-		dbName = attrs["db.instance"]
-	}
-
-	// 3. Try db.namespace (newer semantic conventions)
-	if dbName == "" {
-		dbName = attrs["db.namespace"]
-	}
-
-	// 4. Try parsing from db.connection_string, db.url, or db.dsn
-	if dbName == "" {
-		connKeys := []string{"db.connection_string", "db.url", "db.dsn"}
-		for _, key := range connKeys {
-			if connStr, ok := attrs[key]; ok && connStr != "" {
-				if parsed := extractDbNameFromConnStr(connStr); parsed != "" {
-					dbName = parsed
+		for _, key := range []string{"db.connection_string", "db.url", "db.dsn"} {
+			if conn := attrs[key]; conn != "" {
+				if info := connstr.Parse(conn); info.Database != "" {
+					dbName = info.Database
 					break
 				}
 			}
 		}
 	}
 
-	// 5. Try parsing from db.statement (e.g. USE statement)
 	if dbName == "" {
-		if stmt, ok := attrs["db.statement"]; ok && stmt != "" {
-			if parsed := extractDbNameFromSQL(stmt); parsed != "" {
-				dbName = parsed
-			}
+		if stmt := firstAttr(attrs, "db.statement", "db.query.text"); stmt != "" {
+			dbName = databaseFromUseStatement(stmt)
 		}
 	}
 
-	// Normalize database name
-	dbName = strings.TrimSpace(strings.ToLower(dbName))
-	dbName = strings.Trim(dbName, "'\"` ")
+	dbName = strings.Trim(strings.TrimSpace(strings.ToLower(dbName)), "'\"` ")
 
-	// Correct any truncated names
-	if strings.HasPrefix(dbName, "rmis_project_backend_d") {
-		dbName = "rmis_project_backend_dev"
-	}
-
-	// Apply namespace/service fallbacks dynamically from reported pods config
+	// A blank or engine-default name tells us nothing; prefer what the agent
+	// observed in the pod environment for this service.
 	if dbName == "" || dbName == "unknown" || dbName == "postgres" || dbName == "postgresql" {
-		if reportedDb := s.GetReportedDatabaseForService(span.Namespace, span.ServiceName); reportedDb != "" {
-			dbName = reportedDb
+		if reported := s.GetReportedDatabaseForService(span.Namespace, span.ServiceName); reported != "" {
+			return reported
 		}
 	}
-
 	return dbName
 }
 
-// extractDbNameFromConnStr parses host URL and DSN/PDO formats to extract schema names
-func extractDbNameFromConnStr(connStr string) string {
-	connStr = strings.TrimSpace(connStr)
-	if connStr == "" {
+// databaseFromUseStatement reads the target of a USE statement.
+func databaseFromUseStatement(stmt string) string {
+	fields := strings.Fields(strings.TrimSpace(stmt))
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "use") {
 		return ""
 	}
-
-	// Case A: standard URL scheme (e.g. postgresql://user:pass@host:port/dbname?query=...)
-	if strings.Contains(connStr, "://") {
-		parts := strings.SplitN(connStr, "://", 2)
-		if len(parts) == 2 {
-			rem := parts[1]
-			atIdx := strings.LastIndex(rem, "@")
-			hostPart := rem
-			if atIdx != -1 {
-				hostPart = rem[atIdx+1:]
-			}
-
-			slashIdx := strings.Index(hostPart, "/")
-			if slashIdx != -1 {
-				dbPart := hostPart[slashIdx+1:]
-				if qIdx := strings.Index(dbPart, "?"); qIdx != -1 {
-					dbPart = dbPart[:qIdx]
-				}
-				if hashIdx := strings.Index(dbPart, "#"); hashIdx != -1 {
-					dbPart = dbPart[:hashIdx]
-				}
-				dbPart = strings.TrimSpace(dbPart)
-				if dbPart != "" {
-					return dbPart
-				}
-			}
-		}
-	}
-
-	// Case B: DSN format (key=value pairs separated by semicolons, spaces, or commas)
-	// Example: mysql:host=10.254.5.30;dbname=emuhasibatliq_dev
-	normalized := connStr
-	normalized = strings.ReplaceAll(normalized, ";", " ")
-	normalized = strings.ReplaceAll(normalized, ",", " ")
-
-	if colonIdx := strings.Index(normalized, ":"); colonIdx != -1 && !strings.Contains(normalized[:colonIdx], "=") {
-		normalized = normalized[colonIdx+1:]
-	}
-
-	words := strings.Fields(normalized)
-	for _, word := range words {
-		if strings.Contains(word, "=") {
-			kv := strings.SplitN(word, "=", 2)
-			if len(kv) == 2 {
-				k := strings.ToLower(strings.TrimSpace(kv[0]))
-				v := strings.TrimSpace(kv[1])
-				v = strings.Trim(v, `"'`)
-				if k == "dbname" || k == "database" || k == "databasename" || k == "initial catalog" {
-					if v != "" {
-						return v
-					}
-				}
-			}
-		}
-	}
-
-	return ""
+	return strings.Trim(fields[1], `;"'`)
 }
 
-// extractDbNameFromSQL extracts database name from statements like USE
-func extractDbNameFromSQL(stmt string) string {
-	q := strings.ToLower(strings.TrimSpace(stmt))
-	if strings.HasPrefix(q, "use ") {
-		parts := strings.Fields(q)
-		if len(parts) >= 2 {
-			db := strings.Trim(parts[1], `;"'`)
-			return db
-		}
-	}
-	return ""
-}
-
-// isThirdPartySpan checks if a client span is calling a 3rd-party external tool/API
-func (s *Store) isThirdPartySpan(span *models.Span) (bool, string) {
+// isThirdPartySpan reports whether a client span left the cluster for a
+// third-party API. Spans already identified as a database, cache or broker are
+// infrastructure, not third-party tools.
+//
+// Host matching, the internal DNS suffixes and the private network ranges all
+// come from the dependency ruleset; only the "is this one of our own services"
+// test lives here, because only the store knows the service inventory.
+func (s *Store) isThirdPartySpan(span *models.Span, dep spanenrich.Result) (bool, string) {
 	if span.Kind != models.SpanKindClient && span.Kind != "CLIENT" {
 		return false, ""
 	}
-	// If it has a db.system or messaging.system, it's database/infra, not a 3rd-party tool
+	if dep.System != "" {
+		return false, ""
+	}
 	if span.Attributes["db.system"] != "" || span.Attributes["messaging.system"] != "" {
 		return false, ""
 	}
 
-	host := span.Attributes["server.address"]
+	host := firstAttr(span.Attributes, "server.address", "net.peer.name", "http.host")
 	if host == "" {
-		host = span.Attributes["net.peer.name"]
+		host = hostFromURL(firstAttr(span.Attributes, "http.url", "url.full"))
 	}
 	if host == "" {
-		host = span.Attributes["http.host"]
+		return false, ""
 	}
-	if host == "" {
-		if urlStr := span.Attributes["http.url"]; urlStr != "" {
-			if idx := strings.Index(urlStr, "://"); idx != -1 {
-				rem := urlStr[idx+3:]
-				if endIdx := strings.IndexAny(rem, ":/"); endIdx != -1 {
-					host = rem[:endIdx]
-				} else {
-					host = rem
-				}
+
+	toolName, ok := s.enricher.ClassifyExternal(host)
+	if !ok {
+		return false, ""
+	}
+
+	// A host that matches one of our own service names is internal traffic
+	// reached through an external-looking address.
+	cleanHost := strings.ToLower(host)
+	if idx := strings.Index(cleanHost, ":"); idx != -1 {
+		cleanHost = cleanHost[:idx]
+	}
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+	for key := range s.statsCache {
+		if parts := strings.SplitN(key, ":", 2); len(parts) == 2 && parts[1] == cleanHost {
+			return false, ""
+		}
+	}
+
+	return true, toolName
+}
+
+func hostFromURL(rawURL string) string {
+	idx := strings.Index(rawURL, "://")
+	if idx == -1 {
+		return ""
+	}
+	rest := rawURL[idx+3:]
+	if at := strings.LastIndex(rest, "@"); at != -1 {
+		rest = rest[at+1:]
+	}
+	if end := strings.IndexAny(rest, ":/"); end != -1 {
+		return rest[:end]
+	}
+	return rest
+}
+
+func firstAttr(attrs map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(attrs[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// thirdPartyToolFor reads the third-party attribution recorded at ingest.
+// Read paths must not re-derive it: the write path already decided, and a
+// second opinion here is how the two used to disagree.
+func thirdPartyToolFor(span *models.Span) (string, bool) {
+	if span == nil || span.Attributes == nil {
+		return "", false
+	}
+	if span.Attributes["external.service.is3rdparty"] != "true" {
+		return "", false
+	}
+	name := span.Attributes["external.service"]
+	return name, name != ""
+}
+
+// entrySpan picks the span that best represents where a partial trace was
+// entered: among spans whose parent is absent from the trace, the earliest
+// inbound one, falling back to the earliest of any kind.
+func entrySpan(spans []*models.Span) *models.Span {
+	if len(spans) == 0 {
+		return nil
+	}
+
+	present := make(map[string]struct{}, len(spans))
+	for _, sp := range spans {
+		present[sp.SpanID] = struct{}{}
+	}
+
+	var bestServer, bestAny *models.Span
+	for _, sp := range spans {
+		if _, hasParent := present[sp.ParentSpanID]; hasParent {
+			continue // not an orphan; its parent is in this trace
+		}
+		if bestAny == nil || sp.StartTime.Before(bestAny.StartTime) {
+			bestAny = sp
+		}
+		if sp.Kind == models.SpanKindServer || sp.Kind == "SERVER" {
+			if bestServer == nil || sp.StartTime.Before(bestServer.StartTime) {
+				bestServer = sp
 			}
 		}
 	}
 
-	if host == "" {
-		return false, ""
+	if bestServer != nil {
+		return bestServer
 	}
-
-	hostLower := strings.ToLower(host)
-	cleanHost := hostLower
-	if idx := strings.Index(cleanHost, ":"); idx != -1 {
-		cleanHost = cleanHost[:idx]
+	if bestAny != nil {
+		return bestAny
 	}
-
-	// Skip localhost, local IP addresses, and private cluster ranges
-	if cleanHost == "localhost" || cleanHost == "127.0.0.1" || strings.HasPrefix(cleanHost, "10.") || strings.HasPrefix(cleanHost, "192.168.") || strings.HasPrefix(cleanHost, "172.") {
-		return false, ""
-	}
-
-	if strings.HasSuffix(cleanHost, ".local") || strings.HasSuffix(cleanHost, ".svc") || strings.Contains(cleanHost, ".svc.cluster") || strings.HasSuffix(cleanHost, ".internal") {
-		return false, ""
-	}
-
-	// Check if this host matches an internal microservice name
-	s.statsMu.RLock()
-	defer s.statsMu.RUnlock()
-	for key := range s.statsCache {
-		parts := strings.Split(key, ":")
-		if len(parts) == 2 && parts[1] == cleanHost {
-			return false, ""
+	// Every span claims a parent inside the trace (a cycle, or duplicated ids).
+	// Fall back to the earliest span so the trace still has an identity.
+	earliest := spans[0]
+	for _, sp := range spans[1:] {
+		if sp.StartTime.Before(earliest.StartTime) {
+			earliest = sp
 		}
 	}
-
-	hasDot := strings.Contains(cleanHost, ".")
-
-	// Determine 3rd-party tool name
-	toolName := ""
-	if strings.Contains(cleanHost, "stripe") {
-		toolName = "Stripe"
-	} else if strings.Contains(cleanHost, "paypal") {
-		toolName = "PayPal"
-	} else if strings.Contains(cleanHost, "openai") {
-		toolName = "OpenAI"
-	} else if strings.Contains(cleanHost, "anthropic") {
-		toolName = "Anthropic"
-	} else if strings.Contains(cleanHost, "twilio") {
-		toolName = "Twilio"
-	} else if strings.Contains(cleanHost, "sendgrid") {
-		toolName = "SendGrid"
-	} else if strings.Contains(cleanHost, "mailgun") {
-		toolName = "Mailgun"
-	} else if strings.Contains(cleanHost, "sentry") {
-		toolName = "Sentry"
-	} else if strings.Contains(cleanHost, "github") {
-		toolName = "GitHub"
-	} else if strings.Contains(cleanHost, "slack") {
-		toolName = "Slack"
-	} else if strings.Contains(cleanHost, "discord") {
-		toolName = "Discord"
-	} else if strings.Contains(cleanHost, "auth0") {
-		toolName = "Auth0"
-	} else if strings.Contains(cleanHost, "okta") {
-		toolName = "Okta"
-	} else if strings.Contains(cleanHost, "mygov") {
-		toolName = "MyGov"
-	} else if strings.Contains(cleanHost, "egov") {
-		toolName = "e-Gov"
-	} else if strings.Contains(cleanHost, "google") || strings.Contains(cleanHost, "googleapis") {
-		toolName = "Google API"
-	} else if strings.Contains(cleanHost, "facebook") {
-		toolName = "Facebook API"
-	} else {
-		if !hasDot {
-			return false, ""
-		}
-		toolName = cleanHost
-	}
-
-	return true, toolName
+	return earliest
 }

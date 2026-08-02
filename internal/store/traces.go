@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/httproute"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -33,7 +34,7 @@ func (s *Store) GetTrace(traceID string) (*models.Trace, error) {
 	defer cancel()
 
 	var spans []*models.Span
-	
+
 	// Note: Without an index, finding traces efficiently in S3 requires listing many objects.
 	// We'll use the MinIO ListObjects recursive search but it can be slow on large buckets.
 	// For production, we'd use MinIO metadata indexing or a separate DB for search.
@@ -81,13 +82,18 @@ func (s *Store) SearchEndpoints(q *models.SearchQuery) ([]*models.EndpointStat, 
 	groups := make(map[string]*models.EndpointStat)
 	durs := make(map[string][]float64)
 	for _, it := range items {
-		key := it.ServiceName + "\x00" + it.RootName
+		name := it.TransactionName
+		if name == "" {
+			name = it.RootName
+		}
+		key := it.Namespace + "\x00" + it.ServiceName + "\x00" + name
 		g := groups[key]
 		if g == nil {
-			g = &models.EndpointStat{ServiceName: it.ServiceName, OperationName: it.RootName}
+			g = &models.EndpointStat{ServiceName: it.ServiceName, Namespace: it.Namespace, OperationName: name}
 			groups[key] = g
 		}
 		g.Count++
+		g.SampledCount++
 		if it.HasError {
 			g.ErrorCount++
 		}
@@ -203,7 +209,7 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 					break
 				}
 				// Match 3rd party tool
-				if is3rd, tool := s.isThirdPartySpan(sp); is3rd && strings.ToLower(tool) == baseSys {
+				if tool, is3rd := thirdPartyToolFor(sp); is3rd && strings.ToLower(tool) == baseSys {
 					matched = true
 					break
 				}
@@ -222,7 +228,7 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 		if q.TraceID != "" && !strings.Contains(trace.TraceID, q.TraceID) {
 			continue
 		}
-		if q.Operation != "" && (trace.RootSpan == nil || !strings.Contains(strings.ToLower(trace.RootSpan.Name), strings.ToLower(q.Operation))) {
+		if q.Operation != "" && !traceMatchesOperation(trace, q.Operation) {
 			continue
 		}
 		if q.MinSpans > 0 && trace.SpanCount < q.MinSpans {
@@ -270,6 +276,19 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 	return items, nil
 }
 
+func traceMatchesOperation(trace *models.Trace, operation string) bool {
+	if trace == nil || trace.RootSpan == nil {
+		return false
+	}
+	target := strings.ToLower(strings.TrimSpace(operation))
+	if target == "" {
+		return true
+	}
+	rootName := strings.ToLower(trace.RootSpan.Name)
+	transactionName := strings.ToLower(httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name))
+	return strings.Contains(rootName, target) || strings.Contains(transactionName, target)
+}
+
 // buildTraceListItem assembles the list-view summary of a trace, including
 // involved services, third-party tools, error details and the service flow.
 func (s *Store) buildTraceListItem(trace *models.Trace) *models.TraceListItem {
@@ -278,7 +297,7 @@ func (s *Store) buildTraceListItem(trace *models.Trace) *models.TraceListItem {
 	toolSet := make(map[string]bool)
 	for _, sp := range trace.Spans {
 		svcSet[sp.ServiceName] = true
-		if is3rd, tool := s.isThirdPartySpan(sp); is3rd {
+		if tool, is3rd := thirdPartyToolFor(sp); is3rd {
 			toolSet[tool] = true
 		}
 		if dbSys := sp.Attributes["db.system"]; dbSys != "" {
@@ -388,7 +407,9 @@ func (s *Store) buildTraceListItem(trace *models.Trace) *models.TraceListItem {
 	}
 	if trace.RootSpan != nil {
 		item.RootName = trace.RootSpan.Name
+		item.TransactionName = httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name)
 	}
+	item.Partial = trace.Partial
 	return item
 }
 

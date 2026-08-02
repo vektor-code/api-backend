@@ -15,7 +15,7 @@ func TestAnalyzeTrace_RootCauseAndLatency(t *testing.T) {
 	//   ├── Child 1 (Service: auth, Duration: 10ms)
 	//   └── Child 2 (Service: billing, Duration: 80ms) - Bottleneck (Self: 50ms)
 	//         └── Child 2.1 (Service: db, Duration: 30ms) - Root Cause Error
-	
+
 	rootSpan := &models.Span{
 		TraceID:      "trace-123",
 		SpanID:       "span-root",

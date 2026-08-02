@@ -61,16 +61,22 @@ type Trace struct {
 	DurationMs  float64   `json:"durationMs"`
 	SpanCount   int       `json:"spanCount"`
 	HasError    bool      `json:"hasError"`
+	// Partial is set when the trace's real root span was never stored, so what
+	// is shown begins part-way through the request.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // TraceListItem is a lightweight summary for list views
 type TraceListItem struct {
-	TraceID         string    `json:"traceId"`
-	ServiceName     string    `json:"serviceName"`
-	Namespace       string    `json:"namespace"`
-	Namespaces      []string  `json:"namespaces,omitempty"` // all namespaces the trace crosses, in flow order
-	Cluster         string    `json:"cluster,omitempty"`
-	RootName        string    `json:"rootName"`
+	TraceID     string   `json:"traceId"`
+	ServiceName string   `json:"serviceName"`
+	Namespace   string   `json:"namespace"`
+	Namespaces  []string `json:"namespaces,omitempty"` // all namespaces the trace crosses, in flow order
+	Cluster     string   `json:"cluster,omitempty"`
+	RootName    string   `json:"rootName"`
+	// TransactionName is RootName reduced to a stable endpoint identity, used
+	// for grouping. RootName stays as the SDK wrote it, for display.
+	TransactionName string    `json:"transactionName,omitempty"`
 	StartTime       time.Time `json:"startTime"`
 	DurationMs      float64   `json:"durationMs"`
 	SpanCount       int       `json:"spanCount"`
@@ -80,6 +86,8 @@ type TraceListItem struct {
 	ServiceFlow     []string  `json:"serviceFlow,omitempty"`
 	ErrorType       string    `json:"errorType,omitempty"`
 	ErrorSummary    string    `json:"errorSummary,omitempty"`
+	// Partial is set when the trace's real root span was never stored.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // ServiceStats holds aggregated metrics per service
@@ -153,16 +161,53 @@ type SearchQuery struct {
 // aggregation over the whole query window, used by the Traces "Top traces"
 // view so counts and latencies don't jitter between refreshes.
 type EndpointStat struct {
-	ServiceName   string  `json:"serviceName"`
-	OperationName string  `json:"operationName"`
+	ServiceName   string `json:"serviceName"`
+	Namespace     string `json:"namespace,omitempty"`
+	OperationName string `json:"operationName"`
+	// Count is weighted by the sampling factor, so it estimates real traffic.
 	Count         int64   `json:"count"`
 	ErrorCount    int64   `json:"errorCount"`
 	AvgDurationMs float64 `json:"avgDurationMs"`
 	P95DurationMs float64 `json:"p95DurationMs"`
+	// SampledCount is how many traces were actually stored. When it is below
+	// Count, sampling was active and Count is an estimate.
+	SampledCount int64 `json:"sampledCount"`
 }
 
 // LiveSpan is sent over WebSocket for real-time streaming
 type LiveSpan struct {
 	Type string `json:"type"`
 	Data *Span  `json:"data"`
+}
+
+// DatabaseQueryMetric aggregates database spans that share a query shape.
+//
+// Rows are keyed by Fingerprint — a hash of the query with literals removed —
+// rather than by raw statement text, so "WHERE id = 1" and "WHERE id = 2"
+// aggregate into one row instead of two.
+type DatabaseQueryMetric struct {
+	Fingerprint  string `json:"fingerprint"`
+	Query        string `json:"query"`
+	Summary      string `json:"summary,omitempty"`
+	System       string `json:"system"`
+	Operation    string `json:"operation,omitempty"`
+	Collection   string `json:"collection,omitempty"`
+	DatabaseName string `json:"databaseName,omitempty"`
+	Service      string `json:"service"`
+	Namespace    string `json:"namespace"`
+
+	CallCount  int64   `json:"callCount"`
+	ErrorCount int64   `json:"errorCount"`
+	ErrorRate  float64 `json:"errorRate"`
+
+	AvgDurationMs float64 `json:"avgDurationMs"`
+	P95DurationMs float64 `json:"p95DurationMs"`
+	P99DurationMs float64 `json:"p99DurationMs"`
+	MaxDurationMs float64 `json:"maxDurationMs"`
+	// TotalDurationMs is call count times average latency. It is the ranking
+	// that matters operationally: a fast query run constantly costs more than a
+	// slow query run twice.
+	TotalDurationMs float64 `json:"totalDurationMs"`
+
+	RecentErrors []string `json:"recentErrors"`
 }

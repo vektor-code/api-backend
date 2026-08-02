@@ -786,253 +786,43 @@ func (h *Handler) GetTraceDiagnostics(c *fiber.Ctx) error {
 	return c.JSON(report)
 }
 
-// GET /api/metrics/database
+// GET /api/metrics/database?namespace=&windowMinutes=60
 func (h *Handler) GetDatabaseMetrics(c *fiber.Ctx) error {
 	namespace := c.Query("namespace", "")
-	if namespace != "" && h.store.IsNamespaceDisabled(namespace) {
-		return c.JSON([]*DatabaseQueryMetric{})
+	windowMinutes := c.QueryInt("windowMinutes", defaultDBMetricsWindowMinutes)
+	if windowMinutes < minDBMetricsWindowMinutes {
+		windowMinutes = minDBMetricsWindowMinutes
+	}
+	if windowMinutes > maxDBMetricsWindowMinutes {
+		windowMinutes = maxDBMetricsWindowMinutes
 	}
 
-	spans := h.store.GetRecentSpans(namespace)
+	empty := fiber.Map{"metrics": []*models.DatabaseQueryMetric{}, "windowMinutes": windowMinutes}
+
 	allowed := h.allowedNamespaces(c)
-
-	type key struct {
-		query   string
-		service string
+	if namespace != "" && (h.store.IsNamespaceDisabled(namespace) || !nsAllowed(allowed, namespace)) {
+		return c.JSON(empty)
 	}
-	metricsMap := make(map[key]*DatabaseQueryMetric)
 
-	for _, span := range spans {
-		if h.store.IsNamespaceDisabled(span.Namespace) || !nsAllowed(allowed, span.Namespace) {
-			continue
+	var allowedList []string
+	if allowed != nil {
+		for ns := range allowed {
+			allowedList = append(allowedList, ns)
 		}
-		dbSystem, hasSystem := span.Attributes["db.system"]
-		dbStatement, hasStatement := span.Attributes["db.statement"]
-
-		if !hasSystem && !hasStatement {
-			continue
-		}
-
-		query := dbStatement
-		if query == "" {
-			query = span.Name
-		}
-
-		system := dbSystem
-		if system == "" || system == "unknown" {
-			system = inferDbSystemFromContext(query, span)
-		}
-
-		k := key{query: query, service: span.ServiceName}
-		m, ok := metricsMap[k]
-		if !ok {
-			m = &DatabaseQueryMetric{
-				Query:     query,
-				System:    system,
-				Service:   span.ServiceName,
-				Namespace: span.Namespace,
-			}
-			metricsMap[k] = m
-		}
-
-		m.CallCount++
-		if span.Status == models.SpanStatusError {
-			m.ErrorCount++
-			errMsg := span.Error
-			if errMsg == "" {
-				errMsg = span.Attributes["error.message"]
-			}
-			if errMsg == "" {
-				errMsg = "Database query execution failed"
-			}
-			if len(m.RecentErrors) < 5 {
-				found := false
-				for _, existingErr := range m.RecentErrors {
-					if existingErr == errMsg {
-						found = true
-						break
-					}
-				}
-				if !found {
-					m.RecentErrors = append(m.RecentErrors, errMsg)
-				}
-			}
-		}
-
-		if span.DurationMs > m.MaxDurationMs {
-			m.MaxDurationMs = span.DurationMs
-		}
-		m.AvgDurationMs += span.DurationMs
-	}
-
-	var result []*DatabaseQueryMetric
-	for _, m := range metricsMap {
-		if m.CallCount > 0 {
-			m.AvgDurationMs = m.AvgDurationMs / float64(m.CallCount)
-			m.ErrorRate = (float64(m.ErrorCount) / float64(m.CallCount)) * 100.0
-		}
-		result = append(result, m)
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].AvgDurationMs > result[j].AvgDurationMs
-	})
-
-	return c.JSON(fiber.Map{"metrics": result})
-}
-
-// inferDbSystemFromContext detects the database system by analyzing:
-// 1. Port numbers from span attributes
-// 2. Peer/host name substrings
-// 3. SQL dialect syntax patterns in the query text
-// 4. Span name hints
-func inferDbSystemFromContext(query string, span *models.Span) string {
-	attrs := span.Attributes
-	if attrs == nil {
-		attrs = make(map[string]string)
-	}
-
-	// --- 1. Port-based detection ---
-	port := attrs["server.port"]
-	if port == "" {
-		port = attrs["net.peer.port"]
-	}
-	if port == "" {
-		port = attrs["peer.port"]
-	}
-	switch port {
-	case "5432", "5433":
-		return "postgresql"
-	case "3306", "33060":
-		return "mysql"
-	case "6379":
-		return "redis"
-	case "27017", "27018":
-		return "mongodb"
-	case "1433":
-		return "mssql"
-	case "1521":
-		return "oracle"
-	case "9042":
-		return "cassandra"
-	case "9200", "9300":
-		return "elasticsearch"
-	}
-
-	// --- 2. Peer / host name detection ---
-	peer := strings.ToLower(
-		attrs["net.peer.name"] + " " +
-			attrs["server.address"] + " " +
-			attrs["peer.service"] + " " +
-			attrs["db.connection_string"] + " " +
-			attrs["net.peer.ip"] + " " +
-			attrs["network.peer.address"],
-	)
-	if strings.Contains(peer, "postgres") || strings.Contains(peer, "pgsql") {
-		return "postgresql"
-	}
-	if strings.Contains(peer, "mysql") || strings.Contains(peer, "mariadb") {
-		return "mysql"
-	}
-	if strings.Contains(peer, "redis") {
-		return "redis"
-	}
-	if strings.Contains(peer, "mongo") {
-		return "mongodb"
-	}
-	if strings.Contains(peer, "oracle") {
-		return "oracle"
-	}
-	if strings.Contains(peer, "sqlserver") || strings.Contains(peer, "mssql") {
-		return "mssql"
-	}
-	if strings.Contains(peer, "elastic") {
-		return "elasticsearch"
-	}
-	if strings.Contains(peer, "cassandra") {
-		return "cassandra"
-	}
-
-	// --- 3. Span name / db.name hints ---
-	nameHints := strings.ToLower(span.Name + " " + attrs["db.name"])
-	if strings.Contains(nameHints, "postgres") || strings.Contains(nameHints, "pgsql") || strings.Contains(nameHints, "pg.") || strings.HasPrefix(nameHints, "pg ") {
-		return "postgresql"
-	}
-	if strings.Contains(nameHints, "mysql") || strings.Contains(nameHints, "mariadb") {
-		return "mysql"
-	}
-	if strings.Contains(nameHints, "redis") {
-		return "redis"
-	}
-	if strings.Contains(nameHints, "mongo") {
-		return "mongodb"
-	}
-
-	// --- 4. SQL dialect syntax analysis ---
-	if query != "" {
-		q := strings.ToLower(query)
-
-		// PostgreSQL-specific syntax patterns
-		// Double-quoted identifiers: "table_name"."column_name"
-		hasDoubleQuotedIdent := strings.Contains(query, `"`) && !strings.Contains(query, "`")
-		// :: type cast operator (e.g. value::text, id::integer)
-		hasTypeCast := strings.Contains(query, "::")
-		// ILIKE (case-insensitive LIKE, PostgreSQL-only)
-		hasILike := strings.Contains(q, " ilike ")
-		// RETURNING clause on INSERT/UPDATE/DELETE
-		hasReturning := strings.Contains(q, " returning ")
-		// Array operators: ANY(), @>, <@
-		hasArrayOps := strings.Contains(q, " any(") || strings.Contains(q, "@>") || strings.Contains(q, "<@")
-		// PostgreSQL functions
-		hasPgFuncs := strings.Contains(q, "now()") || strings.Contains(q, "coalesce(") || strings.Contains(q, "string_agg(") || strings.Contains(q, "array_agg(")
-		// $1, $2 parameter placeholders (PostgreSQL uses numbered parameters)
-		hasDollarParams := strings.Contains(query, "$1") || strings.Contains(query, "$2")
-		// PDO / PG library references in span name
-		hasPdoPg := strings.Contains(strings.ToLower(span.Name), "pdo") || strings.Contains(strings.ToLower(span.Name), "pg_")
-
-		if hasTypeCast || hasILike || hasArrayOps || hasPdoPg || hasDollarParams {
-			return "postgresql"
-		}
-		if hasDoubleQuotedIdent && (hasReturning || hasPgFuncs || strings.Contains(q, "select ") || strings.Contains(q, "insert ") || strings.Contains(q, "update ") || strings.Contains(q, "delete ")) {
-			return "postgresql"
-		}
-
-		// MySQL-specific syntax patterns
-		// Backtick-quoted identifiers: `table_name`.`column_name`
-		if strings.Contains(query, "`") {
-			return "mysql"
-		}
-		if strings.Contains(q, "ifnull(") || strings.Contains(q, "group_concat(") {
-			return "mysql"
-		}
-		// MySQL LIMIT without standard SQL syntax
-		if strings.Contains(q, "limit ") && strings.Contains(q, "straight_join") {
-			return "mysql"
-		}
-
-		// MSSQL-specific syntax patterns
-		// Square bracket identifiers: [table_name].[column_name]
-		if strings.Contains(query, "[") && strings.Contains(query, "]") && strings.Contains(q, "select") {
-			return "mssql"
-		}
-		if strings.Contains(q, "select top ") || strings.Contains(q, "with (nolock)") || strings.Contains(q, "getdate()") {
-			return "mssql"
-		}
-
-		// Oracle-specific syntax patterns
-		if strings.Contains(q, " rownum") || strings.Contains(q, "sysdate") || strings.Contains(q, "nvl(") || strings.Contains(q, "decode(") {
-			return "oracle"
-		}
-
-		// Generic SQL fallback — if it looks like SQL, label as "sql" rather than "unknown"
-		if strings.Contains(q, "select ") || strings.Contains(q, "insert ") ||
-			strings.Contains(q, "update ") || strings.Contains(q, "delete ") ||
-			strings.Contains(q, "create ") || strings.Contains(q, "alter ") {
-			return "sql"
+		if allowedList == nil {
+			allowedList = []string{}
 		}
 	}
 
-	return "unknown"
+	metrics, err := h.store.GetDatabaseQueryMetrics(namespace, allowedList, windowMinutes)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	if metrics == nil {
+		metrics = []*models.DatabaseQueryMetric{}
+	}
+
+	return c.JSON(fiber.Map{"metrics": metrics, "windowMinutes": windowMinutes})
 }
 
 // GET/POST /v1/namespaces/config
@@ -1041,19 +831,19 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 
 	if c.Method() == "POST" {
 		var req struct {
-			Cluster        string              `json:"cluster"`
-			AgentNamespace string              `json:"agentNamespace"`
-			Namespaces     []string            `json:"namespaces"`
-			Pods           []store.ReportedPod `json:"pods"`
+			Cluster        string               `json:"cluster"`
+			AgentNamespace string               `json:"agentNamespace"`
+			Namespaces     []string             `json:"namespaces"`
+			Pods           []store.ReportedPod  `json:"pods"`
+			Nodes          []store.ReportedNode `json:"nodes"`
 		}
 		if err := c.BodyParser(&req); err == nil {
 			if req.Cluster != "" {
 				clusterID = req.Cluster
 			}
+			// The agent reports its own namespace; if it's ever missing, store it
+			// empty so it resolves via dynamic discovery rather than a hardcode.
 			agentNs := req.AgentNamespace
-			if agentNs == "" {
-				agentNs = "trace-prod"
-			}
 			h.store.RegisterAgentHeartbeat(clusterID, agentNs)
 			_ = h.store.EnsureAgentClusterInInventory(clusterID, agentNs)
 			for _, ns := range req.Namespaces {
@@ -1075,14 +865,23 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 					h.store.SetReportedPodsForCluster(clusterID, ns, nil)
 				}
 			}
+			if len(req.Nodes) > 0 {
+				h.store.SetReportedNodesForCluster(clusterID, req.Nodes)
+				h.store.SetReportedNodes(req.Nodes)
+			}
 		}
 	}
 
 	disabled := h.store.GetExplicitlyEnabledNamespaces()
+	// Per-workload instrumentation overrides (with the operator-chosen language)
+	// so an agent-managed cluster can annotate the exact services the user
+	// enabled in the dashboard, rather than only creating namespace-level CRs.
+	workloads, _ := h.store.GetWorkloadInstrumentations(clusterID)
 	return c.JSON(fiber.Map{
-		"enabled":  disabled,
-		"disabled": []string{},
-		"cluster":  clusterID,
+		"enabled":   disabled,
+		"disabled":  []string{},
+		"cluster":   clusterID,
+		"workloads": workloads,
 	})
 }
 

@@ -8,31 +8,25 @@ import (
 )
 
 type DiagnosticReport struct {
-	TraceID              string    `json:"traceId"`
-	RootCauseSpanID      string    `json:"rootCauseSpanId,omitempty"`
-	RootCauseService     string    `json:"rootCauseService,omitempty"`
-	RootCauseMessage     string    `json:"rootCauseMessage,omitempty"`
-	BottleneckSpanID     string    `json:"bottleneckSpanId"`
-	BottleneckService    string    `json:"bottleneckService"`
-	BottleneckDurationMs float64   `json:"bottleneckDurationMs"`
-	BottleneckPercent    float64   `json:"bottleneckPercent"`
-	Summary              string    `json:"summary"`
-	Issues               []string  `json:"issues"`
-	Remediations         []string  `json:"remediations"`
+	TraceID              string   `json:"traceId"`
+	RootCauseSpanID      string   `json:"rootCauseSpanId,omitempty"`
+	RootCauseService     string   `json:"rootCauseService,omitempty"`
+	RootCauseMessage     string   `json:"rootCauseMessage,omitempty"`
+	BottleneckSpanID     string   `json:"bottleneckSpanId"`
+	BottleneckService    string   `json:"bottleneckService"`
+	BottleneckDurationMs float64  `json:"bottleneckDurationMs"`
+	BottleneckPercent    float64  `json:"bottleneckPercent"`
+	Summary              string   `json:"summary"`
+	Issues               []string `json:"issues"`
+	Remediations         []string `json:"remediations"`
 }
 
-type DatabaseQueryMetric struct {
-	Query         string   `json:"query"`
-	System        string   `json:"system"`
-	Service       string   `json:"service"`
-	Namespace     string   `json:"namespace"`
-	CallCount     int64    `json:"callCount"`
-	ErrorCount    int64    `json:"errorCount"`
-	ErrorRate     float64  `json:"errorRate"`
-	AvgDurationMs float64  `json:"avgDurationMs"`
-	MaxDurationMs float64  `json:"maxDurationMs"`
-	RecentErrors  []string `json:"recentErrors"`
-}
+// Database-metrics query window bounds, in minutes.
+const (
+	defaultDBMetricsWindowMinutes = 60
+	minDBMetricsWindowMinutes     = 5
+	maxDBMetricsWindowMinutes     = 1440
+)
 
 // AnalyzeTrace parses the span structure to isolate the root error and CPU/wait bottleneck
 func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
@@ -130,9 +124,9 @@ func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
 	var remediations []string
 
 	if rootCauseSpan != nil {
-		summaryParts = append(summaryParts, fmt.Sprintf("Vektor Davis AI isolated the root failure to service '%s' (Span ID: %s) with error: '%s'.", rootCauseSpan.ServiceName, rootCauseSpan.SpanID, report.RootCauseMessage))
+		summaryParts = append(summaryParts, fmt.Sprintf("CRNET APM Davis AI isolated the root failure to service '%s' (Span ID: %s) with error: '%s'.", rootCauseSpan.ServiceName, rootCauseSpan.SpanID, report.RootCauseMessage))
 		issues = append(issues, fmt.Sprintf("Error in service '%s': %s", rootCauseSpan.ServiceName, report.RootCauseMessage))
-		
+
 		msgLower := strings.ToLower(report.RootCauseMessage)
 		if strings.Contains(msgLower, "timeout") || strings.Contains(msgLower, "deadline exceeded") {
 			remediations = append(remediations, fmt.Sprintf("Adjust execution timeout configurations in service '%s'.", rootCauseSpan.ServiceName))
@@ -147,7 +141,7 @@ func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
 	if bottleneckSpan != nil && report.BottleneckPercent > 10.0 {
 		summaryParts = append(summaryParts, fmt.Sprintf("Service '%s' was the primary performance bottleneck, accounting for %.1f%% (%.2fms) of the total trace duration.", bottleneckSpan.ServiceName, report.BottleneckPercent, maxSelfDuration))
 		issues = append(issues, fmt.Sprintf("High self-execution delay in service '%s': %.2fms spent executing code or waiting for un-instrumented resources.", bottleneckSpan.ServiceName, maxSelfDuration))
-		
+
 		if dbSystem, ok := bottleneckSpan.Attributes["db.system"]; ok {
 			dbStmt := bottleneckSpan.Attributes["db.statement"]
 			issues = append(issues, fmt.Sprintf("Slow database query in '%s': '%s'", dbSystem, dbStmt))
@@ -158,7 +152,7 @@ func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
 	}
 
 	if len(summaryParts) == 0 {
-		report.Summary = "Trace processed successfully. Vektor Davis AI detected no errors or performance anomalies."
+		report.Summary = "Trace processed successfully. CRNET APM Davis AI detected no errors or performance anomalies."
 		remediations = append(remediations, "No action required. Transaction execution is within healthy parameters.")
 	} else {
 		report.Summary = strings.Join(summaryParts, " Additionally, ")

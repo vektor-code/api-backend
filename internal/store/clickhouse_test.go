@@ -25,6 +25,41 @@ func TestChTraceIDPredicateKeepsPartialSearch(t *testing.T) {
 	}
 }
 
+func TestChOperationHavingUsesTransactionName(t *testing.T) {
+	predicate := chOperationHaving("GET /g/collect")
+	if !strings.Contains(predicate, "transaction_name") {
+		t.Fatalf("expected operation predicate to use transaction_name, got %s", predicate)
+	}
+	if !strings.Contains(predicate, "operation_name") {
+		t.Fatalf("expected operation predicate to keep operation_name fallback, got %s", predicate)
+	}
+	if !strings.Contains(predicate, "GET /g/collect") {
+		t.Fatalf("expected operation value in predicate, got %s", predicate)
+	}
+}
+
+func TestTraceMatchesOperationUsesTransactionName(t *testing.T) {
+	trace := &models.Trace{
+		RootSpan: &models.Span{
+			Name: "GET",
+			Attributes: map[string]string{
+				"http.method": "GET",
+				"url.path":    "/g/collect",
+			},
+		},
+	}
+
+	if !traceMatchesOperation(trace, "GET /g/collect") {
+		t.Fatal("expected trace to match derived transaction name")
+	}
+	if !traceMatchesOperation(trace, "GET") {
+		t.Fatal("expected trace to keep matching raw root operation")
+	}
+	if traceMatchesOperation(trace, "GET /orders") {
+		t.Fatal("did not expect trace to match unrelated operation")
+	}
+}
+
 func TestChQueryBoundsUsesRetentionWindow(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	s := &Store{retentionHours: 720}

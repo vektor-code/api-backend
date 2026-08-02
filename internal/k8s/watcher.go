@@ -253,18 +253,18 @@ func isFrontendPod(p *corev1.Pod) bool {
 	isBackend := false
 	for _, c := range p.Spec.Containers {
 		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") || 
-			strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") || 
+		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") ||
+			strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") ||
 			strings.Contains(img, "php") || strings.Contains(img, "fpm") || strings.Contains(img, "laravel") ||
-			strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") || 
+			strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") ||
 			strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") {
 			isBackend = true
 			break
 		}
 		for _, env := range c.Env {
 			envName := strings.ToUpper(env.Name)
-			if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") || 
-				strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") || 
+			if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") ||
+				strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") ||
 				strings.Contains(envName, "POSTGRES") || strings.Contains(envName, "MONGO") ||
 				strings.Contains(envName, "RABBITMQ") || strings.Contains(envName, "SPRING_") {
 				isBackend = true
@@ -441,11 +441,9 @@ func (w *Watcher) ReconcileInstrumentation(ctx context.Context, namespace string
 		return nil
 	}
 
-	agentNs := "trace-prod"
+	agentNs := getCurrentNamespace()
 	if agentNss := w.GetAgentNamespaces(); len(agentNss) > 0 {
 		agentNs = agentNss[0]
-	} else {
-		agentNs = getCurrentNamespace()
 	}
 
 	inst := &unstructured.Unstructured{
@@ -475,7 +473,6 @@ func (w *Watcher) ReconcileInstrumentation(ctx context.Context, namespace string
 	return nil
 }
 
-
 // InstrumentationInfo holds metadata about an OTel Auto-Instrumentation CRD resource
 type InstrumentationInfo struct {
 	Name      string `json:"name"`
@@ -501,7 +498,7 @@ func (w *Watcher) GetInstrumentations(ctx context.Context) ([]*InstrumentationIn
 		// FALLBACK: If CRDs are not registered on this cluster, generate them deterministically
 		// for all matching namespaces in the inventory.
 		log.Printf("[k8s] listing instrumentations: %v. Using fallback namespace discovery.", err)
-		
+
 		var fallbackResult []*InstrumentationInfo
 		w.mu.RLock()
 		namespaces := make([]string, len(w.namespaces))
@@ -510,11 +507,9 @@ func (w *Watcher) GetInstrumentations(ctx context.Context) ([]*InstrumentationIn
 
 		for _, ns := range namespaces {
 			if isAppNamespace(ns) {
-				agentNs := "trace-prod"
+				agentNs := getCurrentNamespace()
 				if agentNss := w.GetAgentNamespaces(); len(agentNss) > 0 {
 					agentNs = agentNss[0]
-				} else {
-					agentNs = getCurrentNamespace()
 				}
 				fallbackResult = append(fallbackResult, &InstrumentationInfo{
 					Name:      ns + "-instrumentation",
@@ -601,7 +596,10 @@ func getCurrentNamespace() string {
 	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
 		return ns
 	}
-	return "trace-prod"
+	if ns := os.Getenv("AGENT_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "default"
 }
 
 func (w *Watcher) detectClusterName(ctx context.Context) string {
@@ -678,8 +676,8 @@ func ReconcileRemoteInstrumentation(ctx context.Context, dynClient dynamic.Inter
 		return nil
 	}
 
-	agentNs := "trace-prod"
-	if len(agentNamespaces) > 0 {
+	agentNs := AgentNamespaceFallback()
+	if len(agentNamespaces) > 0 && agentNamespaces[0] != "" {
 		agentNs = agentNamespaces[0]
 	}
 
@@ -742,5 +740,3 @@ func GetRemoteNamespaces(ctx context.Context, host, credentials string) ([]strin
 	}
 	return res, nil
 }
-
-

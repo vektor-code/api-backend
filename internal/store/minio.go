@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/spanenrich"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -60,6 +61,9 @@ type Store struct {
 	reportedPods   map[string][]ReportedPod
 	reportedPodsMu sync.RWMutex
 
+	reportedNodes   map[string][]ReportedNode
+	reportedNodesMu sync.RWMutex
+
 	db              *sql.DB
 	postgresEnabled bool
 
@@ -79,6 +83,10 @@ type Store struct {
 	chURL      string
 	chHotHours int // hours spans stay on the fast disk before moving to MinIO cold tier
 	producer   *spanProducer
+
+	// enricher is the same span-interpretation pipeline the ingestor runs, so
+	// classification cannot drift between the two services.
+	enricher *spanenrich.Enricher
 }
 
 const (
@@ -133,6 +141,12 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		retentionHours:       defaultRetentionHours,
 		maxTraces:            5000,
 	}
+
+	enricher, err := spanenrich.New()
+	if err != nil {
+		log.Printf("[store] WARNING: dependency ruleset: %v (using embedded defaults)", err)
+	}
+	s.enricher = enricher
 
 	_ = s.LoadDisabledNamespaces()
 	_ = s.LoadConfiguredNamespaces()
@@ -481,15 +495,15 @@ func (s *Store) GetClusterInventory() ([]ClusterInventoryItem, error) {
 				status VARCHAR(50) NOT NULL,
 				credential_type VARCHAR(50) DEFAULT 'kubeconfig',
 				api_server VARCHAR(512) DEFAULT '',
-				agent_namespace VARCHAR(255) DEFAULT 'trace-prod',
+				agent_namespace VARCHAR(255) DEFAULT '',
 				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 			)
 		`)
 		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS credential_type VARCHAR(50) DEFAULT 'kubeconfig'`)
 		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS api_server VARCHAR(512) DEFAULT ''`)
-		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS agent_namespace VARCHAR(255) DEFAULT 'trace-prod'`)
+		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS agent_namespace VARCHAR(255) DEFAULT ''`)
 
-		rows, err := s.db.Query("SELECT id, display_name, token, status, COALESCE(credential_type,'kubeconfig'), COALESCE(api_server,''), COALESCE(agent_namespace,'trace-prod') FROM cluster_inventory")
+		rows, err := s.db.Query("SELECT id, display_name, token, status, COALESCE(credential_type,'kubeconfig'), COALESCE(api_server,''), COALESCE(agent_namespace,'') FROM cluster_inventory")
 		if err == nil {
 			defer rows.Close()
 			var list []ClusterInventoryItem
@@ -796,10 +810,10 @@ func defaultCredentialType(t string) string {
 	return t
 }
 
+// defaultAgentNamespace passes the stored value through unchanged. An empty
+// value is intentional: it signals "discover the agent namespace dynamically"
+// rather than pinning a hardcoded default.
 func defaultAgentNamespace(ns string) string {
-	if ns == "" {
-		return "trace-prod"
-	}
 	return ns
 }
 

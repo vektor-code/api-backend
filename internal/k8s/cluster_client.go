@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -154,18 +155,18 @@ func ListWorkloadsInNamespace(ctx context.Context, client kubernetes.Interface, 
 		isBackend := false
 		for _, c := range template.Spec.Containers {
 			img := strings.ToLower(c.Image)
-			if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") || 
-				strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") || 
+			if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") ||
+				strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") ||
 				strings.Contains(img, "php") || strings.Contains(img, "fpm") || strings.Contains(img, "laravel") ||
-				strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") || 
+				strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") ||
 				strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") {
 				isBackend = true
 				break
 			}
 			for _, env := range c.Env {
 				envName := strings.ToUpper(env.Name)
-				if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") || 
-					strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") || 
+				if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") ||
+					strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") ||
 					strings.Contains(envName, "POSTGRES") || strings.Contains(envName, "MONGO") ||
 					strings.Contains(envName, "RABBITMQ") || strings.Contains(envName, "SPRING_") {
 					isBackend = true
@@ -278,7 +279,7 @@ func derefInt32(v *int32) int32 {
 // It returns the resolved language stack and any error.
 func ApplyWorkloadInstrumentation(ctx context.Context, client kubernetes.Interface, clusterID, namespace, workloadName, kind, language, agentNamespace string, enabled bool) (string, error) {
 	if agentNamespace == "" {
-		agentNamespace = "trace-prod"
+		agentNamespace = AgentNamespaceFallback()
 	}
 	if enabled && language != "" && language != "unknown" && language != "auto" && normalizeInjectLanguage(language) == "" {
 		return "", fmt.Errorf("cannot auto-instrument %s/%s: language could not be detected (got %q) — supported languages are java, nodejs, python, go, dotnet, php", namespace, workloadName, language)
@@ -403,11 +404,19 @@ func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentatio
 
 	injectLang := normalizeInjectLanguage(language)
 	if enabled && injectLang != "" && injectLang != "php" {
-		template.Annotations["instrumentation.opentelemetry.io/inject-"+injectLang] = instrumentationName
+		desiredInjectKey := "instrumentation.opentelemetry.io/inject-" + injectLang
+		for k := range template.Annotations {
+			if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") && k != desiredInjectKey {
+				delete(template.Annotations, k)
+			}
+		}
+		template.Annotations[desiredInjectKey] = instrumentationName
 		if injectLang == "go" {
-			if _, ok := template.Annotations["instrumentation.opentelemetry.io/otel-go-auto-target-exe"]; !ok {
+			if target, ok := template.Annotations["instrumentation.opentelemetry.io/otel-go-auto-target-exe"]; !ok || target == "" || target == "/app" {
 				template.Annotations["instrumentation.opentelemetry.io/otel-go-auto-target-exe"] = guessGoTargetExe(template)
 			}
+		} else {
+			delete(template.Annotations, "instrumentation.opentelemetry.io/otel-go-auto-target-exe")
 		}
 	} else {
 		for k := range template.Annotations {
@@ -439,15 +448,45 @@ func normalizeInjectLanguage(language string) string {
 }
 
 func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
-	for _, c := range template.Spec.Containers {
-		if len(c.Command) > 0 {
-			return c.Command[0]
-		}
-		if c.Args != nil && len(c.Args) > 0 {
-			return c.Args[0]
-		}
+	if len(template.Spec.Containers) == 0 {
+		return "/app"
+	}
+	c := template.Spec.Containers[0]
+	if len(c.Command) > 0 && strings.HasPrefix(c.Command[0], "/") {
+		return c.Command[0]
+	}
+	if len(c.Args) > 0 && strings.HasPrefix(c.Args[0], "/") {
+		return c.Args[0]
+	}
+	if name := executableName(c.Name); name != "" {
+		return "/" + name
+	}
+	imageName := c.Image
+	if slash := strings.LastIndex(imageName, "/"); slash >= 0 {
+		imageName = imageName[slash+1:]
+	}
+	if colon := strings.LastIndex(imageName, ":"); colon >= 0 {
+		imageName = imageName[:colon]
+	}
+	if at := strings.LastIndex(imageName, "@"); at >= 0 {
+		imageName = imageName[:at]
+	}
+	if name := executableName(imageName); name != "" {
+		return "/" + name
 	}
 	return "/app"
+}
+
+func executableName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	if strings.ContainsAny(value, " \t\n") {
+		return ""
+	}
+	return value
 }
 
 func setPHPEnvVars(container *corev1.Container, endpoint, namespace, clusterID string) {
@@ -523,11 +562,13 @@ func GetRemoteInstrumentations(ctx context.Context, dynClient dynamic.Interface)
 	return result, nil
 }
 
-// FindAgentNamespace discovers the namespace where agent-backend is running.
+// FindAgentNamespace discovers the namespace where agent-backend is running on
+// the target cluster. It returns "" when the agent pod cannot be found so the
+// caller can decide the fallback (an explicit override or AgentNamespaceFallback).
 func FindAgentNamespace(ctx context.Context, client kubernetes.Interface) string {
 	pods, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return "trace-prod"
+		return ""
 	}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase != corev1.PodRunning {
@@ -541,5 +582,16 @@ func FindAgentNamespace(ctx context.Context, client kubernetes.Interface) string
 			return pod.Namespace
 		}
 	}
-	return "trace-prod"
+	return ""
+}
+
+// AgentNamespaceFallback returns the fallback agent-backend namespace, used only
+// when the agent pod cannot be discovered dynamically. It is configurable via the
+// AGENT_NAMESPACE env var and otherwise resolves to the api-backend's own
+// namespace — it never hardcodes a cluster-specific value.
+func AgentNamespaceFallback() string {
+	if ns := os.Getenv("AGENT_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return getCurrentNamespace()
 }

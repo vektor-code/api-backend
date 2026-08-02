@@ -93,6 +93,60 @@ func (h *Handler) GetTimeseries(c *fiber.Ctx) error {
 	return c.JSON(data)
 }
 
+// GET /api/metrics/latency-distribution
+func (h *Handler) GetLatencyDistribution(c *fiber.Ctx) error {
+	namespace := c.Query("namespace", "")
+	minutes := c.QueryInt("minutes", 60)
+	if minutes < 10 {
+		minutes = 10
+	}
+	if minutes > 1440 {
+		minutes = 1440
+	}
+
+	allowed := h.allowedNamespaces(c)
+	if namespace != "" && (h.store.IsNamespaceDisabled(namespace) || !nsAllowed(allowed, namespace)) {
+		return c.JSON(&store.LatencyDistribution{WindowMinutes: minutes})
+	}
+
+	var allowedList []string
+	if allowed != nil {
+		for ns := range allowed {
+			allowedList = append(allowedList, ns)
+		}
+		if allowedList == nil {
+			allowedList = []string{}
+		}
+	}
+
+	data, err := h.store.GetLatencyDistribution(namespace, allowedList, minutes)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(data)
+}
+
+// GET /api/metrics/infrastructure
+func (h *Handler) GetInfrastructureMetrics(c *fiber.Ctx) error {
+	namespace := c.Query("namespace", "")
+	allowed := h.allowedNamespaces(c)
+	if namespace != "" && (h.store.IsNamespaceDisabled(namespace) || !nsAllowed(allowed, namespace)) {
+		return c.JSON(&store.InfrastructureMetrics{})
+	}
+
+	var allowedList []string
+	if allowed != nil {
+		for ns := range allowed {
+			allowedList = append(allowedList, ns)
+		}
+		if allowedList == nil {
+			allowedList = []string{}
+		}
+	}
+
+	return c.JSON(h.store.GetInfrastructureMetrics(namespace, allowedList))
+}
+
 // GET /api/admin/users
 func (h *Handler) GetUsers(c *fiber.Ctx) error {
 	if err := requireAdmin(c); err != nil {

@@ -197,7 +197,7 @@ func getClientDependencyName(span *models.Span) string {
 	if host == "" {
 		host = span.Attributes["http.host"]
 	}
-	
+
 	if host != "" {
 		if idx := strings.Index(host, ":"); idx != -1 {
 			return host[:idx]

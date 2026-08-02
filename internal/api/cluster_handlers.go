@@ -339,9 +339,15 @@ func (h *Handler) ToggleApplicationInstrumentation(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to connect to cluster: " + err.Error()})
 		}
 
-		agentNs := cluster.AgentNamespace
+		// Discovery is authoritative: the agent's real namespace on the target
+		// cluster wins over any stale/stored value. Fall back to an explicit
+		// per-cluster override, then to the configurable default.
+		agentNs := k8s.FindAgentNamespace(c.Context(), client)
 		if agentNs == "" {
-			agentNs = k8s.FindAgentNamespace(c.Context(), client)
+			agentNs = cluster.AgentNamespace
+		}
+		if agentNs == "" {
+			agentNs = k8s.AgentNamespaceFallback()
 		}
 
 		if req.Enabled {
@@ -427,9 +433,8 @@ func (h *Handler) mergeInventoryTokens(incoming []store.ClusterInventoryItem) ([
 		if incoming[i].CredentialType == "" {
 			incoming[i].CredentialType = "kubeconfig"
 		}
-		if incoming[i].AgentNamespace == "" {
-			incoming[i].AgentNamespace = "trace-prod"
-		}
+		// Leave AgentNamespace empty when unset — it is discovered dynamically
+		// from where agent-backend actually runs, not pinned to a hardcoded value.
 	}
 	return incoming, nil
 }

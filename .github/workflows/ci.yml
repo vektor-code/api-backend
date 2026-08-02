@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/vektor-code/api-backend
+  IMAGE_NAME: ghcr.io/crnet-apm/api-backend
   HELM_VALUES_FILE: values.yaml
 
 jobs:
@@ -70,7 +70,7 @@ jobs:
       - name: Checkout Helm repo via SSH
         uses: actions/checkout@v4
         with:
-          repository: vektor-chart/api-backend
+          repository: crnet-apm-chart/api-backend
           ref: ${{ github.ref_name }}
           path: helm-repo
           ssh-key: ${{ secrets.CHART_REPO_SSH_PRIVATE_KEY }}
@@ -129,12 +129,12 @@ jobs:
           SAFE_BRANCH="${BRANCH_NAME//\//-}"
 
           # Construct ArgoCD application name
-          APP_NAME="vektor-${REPO_NAME}-${SAFE_BRANCH}"
+          APP_NAME="crnet-apm-${REPO_NAME}-${SAFE_BRANCH}"
 
           echo "Syncing ArgoCD app: ${APP_NAME}"
 
           curl -k -X POST \
             -H "Authorization: Bearer ${ARGOCD_TOKEN}" \
             -H "Content-Type: application/json" \
-            "https://argocd.vektor.az/api/v1/applications/${APP_NAME}/sync" \
+            "https://argocd.crnet-apm.az/api/v1/applications/${APP_NAME}/sync" \
             -d '{}'
