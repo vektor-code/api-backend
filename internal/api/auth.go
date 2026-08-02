@@ -26,12 +26,12 @@ type LDAPUser struct {
 	IsAdmin     bool
 }
 
-func getJWTSecret() []byte {
+func getJWTSecret() ([]byte, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		secret = "super-secret-key-2026"
+		return nil, fmt.Errorf("JWT_SECRET is required")
 	}
-	return []byte(secret)
+	return []byte(secret), nil
 }
 
 // LoginHandler handles local and LDAP authentication
@@ -76,14 +76,12 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 			role = perm.Role
 		}
 	} else {
-		// Local Admin auth
+		// Local Admin auth — credentials must come from env/Vault (no defaults).
 		adminUser := os.Getenv("ADMIN_USERNAME")
 		adminPass := os.Getenv("ADMIN_PASSWORD")
-		if adminUser == "" {
-			adminUser = "admin"
-		}
-		if adminPass == "" {
-			adminPass = "tracesvc-admin-pass-2026"
+		if adminUser == "" || adminPass == "" {
+			log.Printf("[auth] ADMIN_USERNAME/ADMIN_PASSWORD not configured")
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "local admin authentication is not configured"})
 		}
 
 		if req.Username != adminUser || req.Password != adminPass {
@@ -103,7 +101,12 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 		"exp":   time.Now().Add(24 * time.Hour).Unix(),
 	})
 
-	tokenString, err := token.SignedString(getJWTSecret())
+	secret, err := getJWTSecret()
+	if err != nil {
+		log.Printf("[auth] %v", err)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "authentication is not configured"})
+	}
+	tokenString, err := token.SignedString(secret)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not generate authentication token"})
 	}
@@ -155,7 +158,7 @@ func AuthMiddleware() fiber.Handler {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
-			return getJWTSecret(), nil
+			return getJWTSecret()
 		})
 
 		if err != nil || !token.Valid {

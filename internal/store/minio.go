@@ -106,13 +106,20 @@ type uploadTask struct {
 
 // New creates a new MinIO store. Bucket ensure is best-effort: MinIO being
 // unreachable must not block process start (same pattern as Postgres).
+// Empty endpoint skips the MinIO client (ClickHouse mode / Vault not ready yet).
 func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, error) {
-	client, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: useSSL,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("minio init: %w", err)
+	var client *minio.Client
+	if endpoint != "" {
+		var err error
+		client, err = minio.New(endpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+			Secure: useSSL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("minio init: %w", err)
+		}
+	} else {
+		log.Printf("[store] WARNING: MINIO_ENDPOINT unset; MinIO client disabled")
 	}
 
 	s := &Store{
@@ -137,9 +144,11 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 	}
 	s.enricher = enricher
 
-	if err := s.ensureBucket(context.Background()); err != nil {
-		log.Printf("[store] WARNING: MinIO not ready (%v); retrying in background", err)
-		go s.ensureBucketLoop()
+	if s.client != nil {
+		if err := s.ensureBucket(context.Background()); err != nil {
+			log.Printf("[store] WARNING: MinIO not ready (%v); retrying in background", err)
+			go s.ensureBucketLoop()
+		}
 	}
 
 	_ = s.LoadDisabledNamespaces()
@@ -201,6 +210,9 @@ func getEnvInt(key string, def int) int {
 }
 
 func (s *Store) ensureBucket(ctx context.Context) error {
+	if s.client == nil {
+		return fmt.Errorf("minio client not configured")
+	}
 	exists, err := s.client.BucketExists(ctx, s.bucketName)
 	if err != nil {
 		return fmt.Errorf("check bucket: %w", err)
