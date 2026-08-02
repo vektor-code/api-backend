@@ -15,9 +15,14 @@ import (
 	"github.com/kubetrace/api-backend/internal/collector"
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/store"
+	"github.com/kubetrace/api-backend/internal/vaultenv"
 )
 
 func main() {
+	if err := vaultenv.Load(); err != nil {
+		log.Printf("[warn] vault: %v (continuing with process env)", err)
+	}
+
 	var (
 		addr             = flag.String("addr", ":8080", "HTTP listen address")
 		minioEndpoint    = flag.String("minio-endpoint", getEnv("MINIO_ENDPOINT", "minio.default.svc.cluster.local:9000"), "MinIO Endpoint")

@@ -1086,6 +1086,9 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 	minioBucket := h.store.GetInfraConfig("MINIO_BUCKET", os.Getenv("MINIO_BUCKET"))
 
 	ldapEnabled := h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED"))
+	if ldapEnabled == "" {
+		ldapEnabled = "false"
+	}
 	ldapURL := h.store.GetInfraConfig("LDAP_URL", os.Getenv("LDAP_URL"))
 	ldapBindDN := h.store.GetInfraConfig("LDAP_BIND_DN", os.Getenv("LDAP_BIND_DN"))
 	ldapBindPassword := h.store.GetInfraConfig("LDAP_BIND_PASSWORD", os.Getenv("LDAP_BIND_PASSWORD"))

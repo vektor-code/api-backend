@@ -104,7 +104,8 @@ type uploadTask struct {
 	contentType string
 }
 
-// New creates a new MinIO store
+// New creates a new MinIO store. Bucket ensure is best-effort: MinIO being
+// unreachable must not block process start (same pattern as Postgres).
 func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, error) {
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -112,18 +113,6 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 	})
 	if err != nil {
 		return nil, fmt.Errorf("minio init: %w", err)
-	}
-
-	ctx := context.Background()
-	exists, err := client.BucketExists(ctx, bucket)
-	if err != nil {
-		return nil, fmt.Errorf("check bucket: %w", err)
-	}
-	if !exists {
-		err = client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("make bucket: %w", err)
-		}
 	}
 
 	s := &Store{
@@ -147,6 +136,11 @@ func New(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*Store, er
 		log.Printf("[store] WARNING: dependency ruleset: %v (using embedded defaults)", err)
 	}
 	s.enricher = enricher
+
+	if err := s.ensureBucket(context.Background()); err != nil {
+		log.Printf("[store] WARNING: MinIO not ready (%v); retrying in background", err)
+		go s.ensureBucketLoop()
+	}
 
 	_ = s.LoadDisabledNamespaces()
 	_ = s.LoadConfiguredNamespaces()
@@ -204,6 +198,35 @@ func getEnvInt(key string, def int) int {
 		return n
 	}
 	return def
+}
+
+func (s *Store) ensureBucket(ctx context.Context) error {
+	exists, err := s.client.BucketExists(ctx, s.bucketName)
+	if err != nil {
+		return fmt.Errorf("check bucket: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if err := s.client.MakeBucket(ctx, s.bucketName, minio.MakeBucketOptions{}); err != nil {
+		return fmt.Errorf("make bucket: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureBucketLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.ensureBucket(ctx)
+		cancel()
+		if err == nil {
+			log.Printf("[store] MinIO bucket %q is ready", s.bucketName)
+			return
+		}
+		log.Printf("[store] WARNING: waiting for MinIO: %v", err)
+	}
 }
 
 // Close shuts down the store

@@ -51,7 +51,11 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 	role := "user"
 
 	if req.Mode == "ldap" {
-		if h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED")) == "false" {
+		ldapEnabled := h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED"))
+		if ldapEnabled == "" {
+			ldapEnabled = "false"
+		}
+		if ldapEnabled != "true" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "LDAP authentication is disabled"})
 		}
 		user, err := loginLDAP(h.store, req.Username, req.Password)
