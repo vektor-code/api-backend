@@ -39,6 +39,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	// Auth routes
 	api.Post("/auth/login", h.LoginHandler)
 	api.Post("/auth/lookup", h.LookupAccountHandler)
+	api.Post("/auth/refresh", h.RefreshHandler)
 	api.Get("/auth/me", h.GetMeHandler)
 
 	api.Get("/namespaces", h.GetNamespaces)

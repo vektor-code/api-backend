@@ -35,6 +35,110 @@ func getJWTSecret() ([]byte, error) {
 	return []byte(secret), nil
 }
 
+func accessTokenTTL() time.Duration {
+	// Short-lived access tokens; clients renew via POST /api/auth/refresh.
+	minutes := 60
+	if raw := strings.TrimSpace(os.Getenv("JWT_TTL_MINUTES")); raw != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil && parsed > 0 {
+			minutes = parsed
+		}
+	}
+	if minutes < 5 {
+		minutes = 5
+	}
+	if minutes > 24*60 {
+		minutes = 24 * 60
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func issueAccessToken(username, displayName, email, role string) (string, error) {
+	secret, err := getJWTSecret()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":   username,
+		"name":  displayName,
+		"email": email,
+		"role":  role,
+		"iat":   now.Unix(),
+		"exp":   now.Add(accessTokenTTL()).Unix(),
+	})
+	return token.SignedString(secret)
+}
+
+func parseBearerToken(authHeader string) (string, error) {
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" || parts[1] == "" {
+		return "", fmt.Errorf("invalid authorization header format")
+	}
+	return parts[1], nil
+}
+
+func parseAccessToken(tokenString string, allowExpiredWithin time.Duration) (*jwt.Token, jwt.MapClaims, error) {
+	secret, err := getJWTSecret()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var parser *jwt.Parser
+	if allowExpiredWithin > 0 {
+		parser = jwt.NewParser(
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+			jwt.WithoutClaimsValidation(),
+		)
+	} else {
+		parser = jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
+	}
+
+	claims := jwt.MapClaims{}
+	token, err := parser.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return secret, nil
+	})
+	if err != nil || token == nil || !token.Valid {
+		return nil, nil, fmt.Errorf("invalid token")
+	}
+
+	sub, _ := claims["sub"].(string)
+	if strings.TrimSpace(sub) == "" {
+		return nil, nil, fmt.Errorf("invalid token subject")
+	}
+
+	if allowExpiredWithin > 0 {
+		expRaw, ok := claims["exp"]
+		if !ok {
+			return nil, nil, fmt.Errorf("invalid token expiry")
+		}
+		var expUnix int64
+		switch v := expRaw.(type) {
+		case float64:
+			expUnix = int64(v)
+		case int64:
+			expUnix = v
+		default:
+			return nil, nil, fmt.Errorf("invalid token expiry")
+		}
+		if expiredFor := time.Since(time.Unix(expUnix, 0)); expiredFor > allowExpiredWithin {
+			return nil, nil, fmt.Errorf("token expired")
+		}
+	}
+
+	return token, claims, nil
+}
+
+func claimString(claims jwt.MapClaims, key string) string {
+	if v, ok := claims[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // LoginHandler handles local and LDAP authentication
 func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 	var req LoginRequest
@@ -101,27 +205,19 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 		}
 	}
 
-	// Issue JWT token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":   req.Username,
-		"name":  displayName,
-		"email": email,
-		"role":  role,
-		"exp":   time.Now().Add(24 * time.Hour).Unix(),
-	})
-
-	secret, err := getJWTSecret()
+	// Issue JWT access token (renew via /api/auth/refresh).
+	tokenString, err := issueAccessToken(req.Username, displayName, email, role)
 	if err != nil {
-		log.Printf("[auth] %v", err)
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "authentication is not configured"})
-	}
-	tokenString, err := token.SignedString(secret)
-	if err != nil {
+		if strings.Contains(err.Error(), "JWT_SECRET") {
+			log.Printf("[auth] %v", err)
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "authentication is not configured"})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not generate authentication token"})
 	}
 
 	return c.JSON(fiber.Map{
-		"token": tokenString,
+		"token":      tokenString,
+		"expires_in": int(accessTokenTTL().Seconds()),
 		"user": fiber.Map{
 			"username":    req.Username,
 			"displayName": displayName,
@@ -188,35 +284,84 @@ func (h *Handler) LookupAccountHandler(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"exists": false})
 }
 
+// RefreshHandler renews an access token. Accepts a token that expired within
+// the last 24h so brief offline periods do not force a full login.
+func (h *Handler) RefreshHandler(c *fiber.Ctx) error {
+	tokenString, err := parseBearerToken(c.Get("Authorization"))
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing authorization token"})
+	}
+
+	_, claims, err := parseAccessToken(tokenString, 24*time.Hour)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or expired authorization token"})
+	}
+
+	username := claimString(claims, "sub")
+	displayName := claimString(claims, "name")
+	email := claimString(claims, "email")
+	role := claimString(claims, "role")
+	if role == "" {
+		role = "user"
+	}
+
+	if perm := h.store.GetCachedUserPermission(username); perm != nil {
+		if perm.DisplayName != "" {
+			displayName = perm.DisplayName
+		}
+		if perm.Email != "" {
+			email = perm.Email
+		}
+		if perm.Role != "" {
+			role = perm.Role
+		}
+	}
+	if displayName == "" {
+		displayName = username
+	}
+
+	tokenString, err = issueAccessToken(username, displayName, email, role)
+	if err != nil {
+		if strings.Contains(err.Error(), "JWT_SECRET") {
+			log.Printf("[auth] refresh: %v", err)
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "authentication is not configured"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Could not refresh authentication token"})
+	}
+
+	return c.JSON(fiber.Map{
+		"token":      tokenString,
+		"expires_in": int(accessTokenTTL().Seconds()),
+		"user": fiber.Map{
+			"username":    username,
+			"displayName": displayName,
+			"email":       email,
+			"role":        role,
+		},
+	})
+}
+
 // AuthMiddleware validates JWT Bearer tokens
 func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// Bypass auth for non-API, health, ingestion, and websockets, or login route itself
+		// Bypass auth for non-API, health, ingestion, and public auth routes
 		path := c.Path()
-		if path == "/api/auth/login" || path == "/api/auth/lookup" || path == "/api/health" || path == "/health" || path == "/ready" || path == "/v1/traces" || path == "/api/ingest" {
+		if path == "/api/auth/login" || path == "/api/auth/lookup" || path == "/api/auth/refresh" || path == "/api/health" || path == "/health" || path == "/ready" || path == "/v1/traces" || path == "/api/ingest" {
 			return c.Next()
 		}
 
-		// Read Auth header
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Missing authorization token"})
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		tokenString, err := parseBearerToken(authHeader)
+		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid authorization header format"})
 		}
 
-		tokenString := parts[1]
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return getJWTSecret()
-		})
-
-		if err != nil || !token.Valid {
+		token, _, err := parseAccessToken(tokenString, 0)
+		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or expired authorization token"})
 		}
 
