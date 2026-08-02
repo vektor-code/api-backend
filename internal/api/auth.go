@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kubetrace/api-backend/internal/store"
+	"github.com/kubetrace/api-backend/internal/vaultenv"
 )
 
 type LoginRequest struct {
@@ -76,20 +77,28 @@ func (h *Handler) LoginHandler(c *fiber.Ctx) error {
 			role = perm.Role
 		}
 	} else {
-		// Local Admin auth — credentials must come from env/Vault (no defaults).
-		adminUser := os.Getenv("ADMIN_USERNAME")
-		adminPass := os.Getenv("ADMIN_PASSWORD")
-		if adminUser == "" || adminPass == "" {
-			log.Printf("[auth] ADMIN_USERNAME/ADMIN_PASSWORD not configured")
+		// Local bootstrap admin — credentials from Vault/env; synced into
+		// Postgres like ASPM EnsureBootstrapAdmin (password + admin role).
+		if err := vaultenv.Load(); err != nil {
+			log.Printf("[auth] vault reload: %v", err)
+		}
+		adminUser, _, adminEmail := store.BootstrapAdminCreds()
+		if adminUser == "" {
+			log.Printf("[auth] ADMIN_USERNAME/BOOTSTRAP_ADMIN_USERNAME not configured")
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "local admin authentication is not configured"})
 		}
-
-		if req.Username != adminUser || req.Password != adminPass {
+		if !h.store.VerifyBootstrapAdminPassword(req.Username, req.Password) {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid local admin credentials"})
 		}
+		if _, err := h.store.EnsureBootstrapAdmin(); err != nil {
+			log.Printf("[auth] bootstrap admin sync: %v", err)
+		}
 		displayName = "Local Administrator"
-		email = "admin@kubetrace.local"
+		email = adminEmail
 		role = "admin"
+		if perm := h.store.RecordUserLogin(req.Username, displayName, email, true); perm != nil {
+			role = "admin"
+		}
 	}
 
 	// Issue JWT token

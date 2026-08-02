@@ -59,6 +59,15 @@ func main() {
 		log.Printf("Connecting to Postgres at %s:%d (db: %s)", *postgresHost, *postgresPort, *postgresDB)
 		if err := traceStore.InitPostgres(connStr); err != nil {
 			log.Printf("[warn] PostgreSQL initialization failed: %v. Falling back to MinIO config backend.", err)
+		} else if result, err := traceStore.EnsureBootstrapAdmin(); err != nil {
+			log.Printf("[warn] bootstrap admin sync failed: %v", err)
+		} else if result.Created {
+			user, _, _ := store.BootstrapAdminCreds()
+			log.Printf("created bootstrap admin %q", user)
+		} else if result.PasswordUpdated || result.RoleUpdated {
+			user, _, _ := store.BootstrapAdminCreds()
+			log.Printf("synced bootstrap admin %q from Vault/config (password_updated=%v role_updated=%v)",
+				user, result.PasswordUpdated, result.RoleUpdated)
 		}
 	} else {
 		log.Println("PostgreSQL host not configured. Running config store with MinIO only.")
