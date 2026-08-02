@@ -142,12 +142,58 @@ func (h *Handler) GetMeHandler(c *fiber.Ctx) error {
 	})
 }
 
+type LookupRequest struct {
+	Username string `json:"username"`
+	Mode     string `json:"mode"` // "local" or "ldap"
+}
+
+// LookupAccountHandler checks whether a username can proceed to password entry.
+func (h *Handler) LookupAccountHandler(c *fiber.Ctx) error {
+	var req LookupRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Username is required"})
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "local"
+	}
+
+	if mode == "ldap" {
+		ldapEnabled := h.store.GetInfraConfig("LDAP_ENABLED", os.Getenv("LDAP_ENABLED"))
+		if ldapEnabled == "" {
+			ldapEnabled = "false"
+		}
+		if ldapEnabled != "true" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "LDAP authentication is disabled"})
+		}
+		// LDAP directories are validated at bind time; allow password step when LDAP is on.
+		return c.JSON(fiber.Map{"exists": true})
+	}
+
+	if err := vaultenv.Load(); err != nil {
+		log.Printf("[auth] vault reload on lookup: %v", err)
+	}
+	adminUser, _, _ := store.BootstrapAdminCreds()
+	if adminUser != "" && strings.EqualFold(username, adminUser) {
+		return c.JSON(fiber.Map{"exists": true})
+	}
+	if perm := h.store.GetCachedUserPermission(username); perm != nil {
+		return c.JSON(fiber.Map{"exists": true})
+	}
+	return c.JSON(fiber.Map{"exists": false})
+}
+
 // AuthMiddleware validates JWT Bearer tokens
 func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Bypass auth for non-API, health, ingestion, and websockets, or login route itself
 		path := c.Path()
-		if path == "/api/auth/login" || path == "/api/health" || path == "/health" || path == "/ready" || path == "/v1/traces" || path == "/api/ingest" {
+		if path == "/api/auth/login" || path == "/api/auth/lookup" || path == "/api/health" || path == "/health" || path == "/ready" || path == "/v1/traces" || path == "/api/ingest" {
 			return c.Next()
 		}
 
