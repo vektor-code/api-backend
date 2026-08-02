@@ -1,29 +1,12 @@
-stages:
-  - build
+include:
+- file: gitlab-ci-template.yml
+  project: devops/cicd-template/ci-template
 
 variables:
-  DOCKER_HOST: tcp://docker:2375
-  DOCKER_TLS_CERTDIR: ""
-  REGISTRY: "ghcr.io"
-  REGISTRY_IMAGE: "ghcr.io/crnet-apm/api-backend"
-  PROD_TAG: "prod-$CI_COMMIT_SHORT_SHA"
-  PROD_LATEST: "prod-latest"
-
-build-and-push:
-  stage: build
-  image: docker:24.0.9
-  services:
-    - name: docker:24.0.9-dind
-      alias: docker
-  only:
-    - prod
-  script:
-    - |
-      if [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_PASSWORD" ]; then
-        echo "$REGISTRY_PASSWORD" | docker login $REGISTRY -u "$REGISTRY_USER" --password-stdin
-      elif [ -n "$CI_REGISTRY_USER" ] && [ -n "$CI_REGISTRY_PASSWORD" ]; then
-        docker login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
-      fi
-    - docker build -t $REGISTRY_IMAGE:$PROD_TAG -t $REGISTRY_IMAGE:$PROD_LATEST .
-    - docker push $REGISTRY_IMAGE:$PROD_TAG
-    - docker push $REGISTRY_IMAGE:$PROD_LATEST
+  CI_CLUSTER_TYPE: INT-MON
+  CI_APPLICATION_TYPE: GO
+  CI_BRANCHING_TYPE: GITFLOW
+  CI_IMAGE_REGISTRY: NEXUS
+  CI_PROJECT_MODE: MONO
+  CI_PROJECT_TYPE: BACKEND
+  CI_RELEASE_TYPE: KANIKO
