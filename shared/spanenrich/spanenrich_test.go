@@ -291,3 +291,66 @@ func TestProducerAndConsumerStillClassify(t *testing.T) {
 		}
 	}
 }
+
+func TestMalformedHTTPServerPreservesRawSpan(t *testing.T) {
+	e := testEnricher(t)
+	cases := []struct{ name, method string }{
+		{"gzip, br", "gzip, br"},
+		{"https://", "https://"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		tags := map[string]string{
+			"http.request.method": tc.method,
+			"http.method":         tc.method,
+		}
+		if tc.method == "" {
+			tags["url.path"] = "/still-http"
+		}
+		got := e.Enrich(tags, tc.name, "SERVER")
+		if got.Transaction != "" {
+			t.Errorf("%q: Transaction = %q, want empty", tc.name, got.Transaction)
+		}
+		if tags[TagHTTPIdentity] != HTTPIdentityMalformed {
+			t.Errorf("%q: missing malformed marker, got %q", tc.name, tags[TagHTTPIdentity])
+		}
+		if tags["http.request.method"] != tc.method {
+			t.Errorf("%q: method rewritten to %q", tc.name, tags["http.request.method"])
+		}
+	}
+}
+
+func TestCLIENTMalformedMethodStillDependencyPath(t *testing.T) {
+	e := testEnricher(t)
+	tags := map[string]string{
+		"http.request.method": "gzip, br",
+		"http.method":         "gzip, br",
+		"url.full":            "https://example.com/g/collect",
+	}
+	got := e.Enrich(tags, "gzip, br", "CLIENT")
+	if tags[TagHTTPIdentity] == HTTPIdentityMalformed {
+		t.Fatal("CLIENT must not be marked malformed HTTP SERVER telemetry")
+	}
+	if got.Transaction == "" {
+		t.Fatal("CLIENT must still follow existing naming, not SERVER identity gating")
+	}
+}
+
+func TestCustomTokenMethodRemainsTransaction(t *testing.T) {
+	e := testEnricher(t)
+	for _, method := range []string{"PURGE", "PROPFIND", "CUSTOM"} {
+		tags := map[string]string{"http.request.method": method, "http.route": "/cache"}
+		got := e.Enrich(tags, method, "SERVER")
+		if got.Transaction == "" {
+			t.Errorf("%s: Transaction empty", method)
+		}
+		if tags[TagHTTPIdentity] != "" {
+			t.Errorf("%s: unexpectedly marked %q", method, tags[TagHTTPIdentity])
+		}
+	}
+	getTags := map[string]string{"http.request.method": "GET", "http.route": "/g/collect"}
+	got := e.Enrich(getTags, "GET", "SERVER")
+	if got.Transaction != "GET /g/collect" {
+		t.Errorf("GET /g/collect Transaction = %q", got.Transaction)
+	}
+}

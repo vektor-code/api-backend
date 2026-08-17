@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/httproute"
 )
 
 const (
@@ -185,6 +186,13 @@ func chTraceIDPredicate(traceID string) string {
 }
 
 const chRootSpanPredicate = "parent_span_id = '' OR match(parent_span_id, '^0+$')"
+
+// chEndpointRootPredicate is the root-span predicate plus HTTP SERVER identity
+// eligibility. Malformed HTTP SERVER spans stay in the trace; they must not
+// mint Top Transactions identity. Duration aggregation is unchanged.
+func chEndpointRootPredicate() string {
+	return "((" + chRootSpanPredicate + ") AND " + httproute.CHHTTPServerIdentityEligible("kind", "tags") + ")"
+}
 
 func chRootTransactionNameExpr() string {
 	return fmt.Sprintf("anyIf(if(transaction_name != '', transaction_name, operation_name), %s)", chRootSpanPredicate)
@@ -680,7 +688,7 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 		maxIf(sample_weight, %s) AS weight
 	FROM kubetrace.spans
 	WHERE %s
-	GROUP BY trace_id`, chRootSpanPredicate, chRootSpanPredicate, chRootSpanPredicate, chRootSpanPredicate, strings.Join(where, " AND "))
+	GROUP BY trace_id`, chEndpointRootPredicate(), chEndpointRootPredicate(), chEndpointRootPredicate(), chRootSpanPredicate, strings.Join(where, " AND "))
 	if len(having) > 0 {
 		inner += "\n\tHAVING " + strings.Join(having, " AND ")
 	}
@@ -698,7 +706,7 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 		quantile(0.95)(dur_ms) AS p95_ms,
 		count() AS sampled_cnt
 	FROM (%s)
-	WHERE root_service != ''
+	WHERE root_service != '' AND root_op != '' AND root_op != '-'
 	GROUP BY service_name, namespace, operation_name
 	ORDER BY (avg_ms * cnt) DESC
 	LIMIT %d`, inner, limit)
@@ -710,10 +718,14 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 
 	out := make([]*models.EndpointStat, 0, len(rows))
 	for _, row := range rows {
+		op := chString(row["operation_name"])
+		if strings.TrimSpace(op) == "" || op == "-" {
+			continue
+		}
 		out = append(out, &models.EndpointStat{
 			ServiceName:   chString(row["service_name"]),
 			Namespace:     chString(row["namespace"]),
-			OperationName: chString(row["operation_name"]),
+			OperationName: op,
 			Count:         chInt(row["cnt"]),
 			ErrorCount:    chInt(row["err_cnt"]),
 			AvgDurationMs: chFloat(row["avg_ms"]),

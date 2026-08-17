@@ -25,6 +25,20 @@ func TestChTraceIDPredicateKeepsPartialSearch(t *testing.T) {
 	}
 }
 
+func TestChEndpointRootPredicateGatesMalformedHTTPServer(t *testing.T) {
+	pred := chEndpointRootPredicate()
+	if !strings.Contains(pred, "upperUTF8(kind) != 'SERVER'") {
+		t.Fatalf("missing SERVER identity gate: %s", pred)
+	}
+	if !strings.Contains(pred, "http.request.method") {
+		t.Fatalf("missing method key: %s", pred)
+	}
+	// Duration still uses the ungated root predicate.
+	if strings.Contains(chRootSpanPredicate, "http.request.method") {
+		t.Fatal("chRootSpanPredicate must stay duration-unrelated")
+	}
+}
+
 func TestChOperationHavingUsesTransactionName(t *testing.T) {
 	predicate := chOperationHaving("GET /g/collect")
 	if !strings.Contains(predicate, "transaction_name") {

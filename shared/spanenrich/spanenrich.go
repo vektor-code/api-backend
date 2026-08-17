@@ -31,6 +31,11 @@ const (
 	// TagFingerprint carries the query fingerprint so that consumers reading
 	// spans as attribute maps can group by query shape without re-normalizing.
 	TagFingerprint = "crnet-apm.db.fingerprint"
+	// TagHTTPIdentity marks SERVER spans whose HTTP method is not a token.
+	// Diagnostic only — original method attributes and span.name are left intact.
+	TagHTTPIdentity = "crnet.apm.http_identity"
+	// HTTPIdentityMalformed is the TagHTTPIdentity value for ineligible HTTP SERVER spans.
+	HTTPIdentityMalformed = "malformed"
 	// AttrAdjustedCount mirrors the collector's sampling attribute.
 	AttrAdjustedCount = "crnet.apm.sampling.adjusted_count"
 )
@@ -136,7 +141,11 @@ func (e *Enricher) Enrich(tags map[string]string, spanName, spanKind string) Res
 
 	e.applyQuery(tags, out.System, &out)
 	out.Namespace = tags["db.name"]
-	out.Transaction = httproute.TransactionName(tags, spanName)
+	if httproute.HTTPServerIdentityEligible(spanKind, tags) {
+		out.Transaction = httproute.TransactionName(tags, spanName)
+	} else {
+		tags[TagHTTPIdentity] = HTTPIdentityMalformed
+	}
 	out.SampleWeight = sampleWeight(tags)
 
 	return out

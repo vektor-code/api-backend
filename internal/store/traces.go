@@ -82,9 +82,9 @@ func (s *Store) SearchEndpoints(q *models.SearchQuery) ([]*models.EndpointStat, 
 	groups := make(map[string]*models.EndpointStat)
 	durs := make(map[string][]float64)
 	for _, it := range items {
-		name := it.TransactionName
-		if name == "" {
-			name = it.RootName
+		name := strings.TrimSpace(it.TransactionName)
+		if name == "" || name == "-" {
+			continue
 		}
 		key := it.Namespace + "\x00" + it.ServiceName + "\x00" + name
 		g := groups[key]
@@ -407,7 +407,9 @@ func (s *Store) buildTraceListItem(trace *models.Trace) *models.TraceListItem {
 	}
 	if trace.RootSpan != nil {
 		item.RootName = trace.RootSpan.Name
-		item.TransactionName = httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name)
+		if httproute.HTTPServerIdentityEligible(string(trace.RootSpan.Kind), trace.RootSpan.Attributes) {
+			item.TransactionName = httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name)
+		}
 	}
 	item.Partial = trace.Partial
 	return item
