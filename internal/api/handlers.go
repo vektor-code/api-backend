@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +21,6 @@ import (
 	"github.com/kubetrace/api-backend/internal/store"
 	"github.com/kubetrace/api-backend/internal/tracediag"
 	"github.com/kubetrace/api-backend/internal/traceinvest"
-	"k8s.io/client-go/kubernetes"
 )
 
 // traceResponse is the GetTrace payload. FailureDiagnosis is derived from the
@@ -112,18 +112,17 @@ type Handler struct {
 	store  *store.Store
 	k8s    *k8s.Watcher
 	hub    *Hub
-	invest *traceinvest.Investigator
+	invest *traceinvest.Store
 }
 
 // NewHandler creates the API handler
 func NewHandler(s *store.Store, w *k8s.Watcher) *Handler {
-	h := &Handler{
-		store: s,
-		k8s:   w,
-		hub:   newHub(),
+	return &Handler{
+		store:  s,
+		k8s:    w,
+		hub:    newHub(),
+		invest: traceinvest.NewStore(),
 	}
-	h.invest = traceinvest.New(h.resolveCluster)
-	return h
 }
 
 // OnSpan is called by the collector when a new span arrives — broadcasts live
@@ -397,8 +396,8 @@ func (h *Handler) GetTraceFailureDiagnosis(c *fiber.Ctx) error {
 }
 
 // GET /api/traces/:id/investigation
-// Active Kubernetes investigator. Never used by GetTrace, so opening a trace
-// stays a telemetry-only render.
+// Enqueues a structured investigation intent for the agent. Never talks to
+// Kubernetes and never blocks GetTrace.
 func (h *Handler) GetTraceInvestigation(c *fiber.Ctx) error {
 	traceID := c.Params("id")
 	trace, err := h.store.GetTrace(traceID)
@@ -415,26 +414,50 @@ func (h *Handler) GetTraceInvestigation(c *fiber.Ctx) error {
 	if h.invest == nil {
 		return c.JSON(&traceinvest.Report{TraceID: trace.TraceID, Status: traceinvest.StatusUnavailable, SkipReason: "Investigator not configured"})
 	}
-	return c.JSON(h.invest.Investigate(c.Context(), trace, diag))
+	clusterID := h.investigationCluster(trace)
+	agentOnline := h.store.IsAgentManagedCluster(clusterID)
+	return c.JSON(h.invest.Request(trace, diag, clusterID, agentOnline, time.Now()))
 }
 
-func (h *Handler) resolveCluster(ctx context.Context, trace *models.Trace) (traceinvest.Cluster, error) {
-	if trace != nil && trace.Cluster != "" {
-		item, err := h.store.GetClusterByID(trace.Cluster)
-		if err == nil && item != nil && item.Token != "" && item.Status == "Active" {
-			cfg, err := k8s.BuildRestConfig(clusterHost(*item), item.Token)
-			if err == nil {
-				client, err := kubernetes.NewForConfig(cfg)
-				if err == nil {
-					return k8s.NewAccess(client, cfg), nil
-				}
-			}
+func (h *Handler) investigationCluster(trace *models.Trace) string {
+	if trace != nil && strings.TrimSpace(trace.Cluster) != "" && h.store.IsAgentManagedCluster(trace.Cluster) {
+		return trace.Cluster
+	}
+	agents := h.store.GetAgentManagedClusters()
+	if len(agents) == 1 {
+		return agents[0].ClusterID
+	}
+	if trace != nil && strings.TrimSpace(trace.Cluster) != "" {
+		return trace.Cluster
+	}
+	return "default"
+}
+
+// GET /v1/investigations/jobs — agent pull. The API never reaches the agent.
+func (h *Handler) ClaimInvestigationJobs(c *fiber.Ctx) error {
+	clusterID := c.Query("cluster", "default")
+	limit := 5
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
 		}
 	}
-	if h.k8s != nil && h.k8s.Client() != nil {
-		return k8s.NewAccess(h.k8s.Client(), h.k8s.RESTConfig()), nil
+	if h.invest == nil {
+		return c.JSON([]traceinvest.Intent{})
 	}
-	return nil, nil
+	return c.JSON(h.invest.Claim(clusterID, limit, time.Now()))
+}
+
+// POST /v1/investigations/results — agent push.
+func (h *Handler) SubmitInvestigationResult(c *fiber.Ctx) error {
+	var res traceinvest.Result
+	if err := c.BodyParser(&res); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid investigation result"})
+	}
+	if h.invest == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "investigator not configured"})
+	}
+	return c.JSON(h.invest.Submit(res, time.Now()))
 }
 
 // traceVisibleTo reports whether the caller may see this trace: true when any
@@ -950,15 +973,17 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 	}
 
 	disabled := h.store.GetExplicitlyEnabledNamespaces()
-	// Per-workload instrumentation overrides (with the operator-chosen language)
-	// so an agent-managed cluster can annotate the exact services the user
-	// enabled in the dashboard, rather than only creating namespace-level CRs.
 	workloads, _ := h.store.GetWorkloadInstrumentations(clusterID)
+	var investigations []traceinvest.Intent
+	if c.Method() == "POST" && h.invest != nil {
+		investigations = h.invest.Claim(clusterID, 5, time.Now())
+	}
 	return c.JSON(fiber.Map{
-		"enabled":   disabled,
-		"disabled":  []string{},
-		"cluster":   clusterID,
-		"workloads": workloads,
+		"enabled":         disabled,
+		"disabled":        []string{},
+		"cluster":         clusterID,
+		"workloads":       workloads,
+		"investigations":  investigations,
 	})
 }
 

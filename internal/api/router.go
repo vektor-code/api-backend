@@ -30,6 +30,8 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	app.Post("/v1/traces", recv.HandleHTTP)
 	app.Get("/v1/namespaces/config", h.GetNamespaceConfig)
 	app.Post("/v1/namespaces/config", h.GetNamespaceConfig)
+	app.Get("/v1/investigations/jobs", h.ClaimInvestigationJobs)
+	app.Post("/v1/investigations/results", h.SubmitInvestigationResult)
 	app.Post("/api/ingest", recv.IngestJSON)
 
 	// REST API
