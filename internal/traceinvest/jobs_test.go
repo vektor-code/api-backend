@@ -119,6 +119,8 @@ func TestStoreCoalescesSameFingerprint(t *testing.T) {
 		Fingerprint: first.Fingerprint,
 		Status:      StatusComplete,
 		Inference:   "backend is likely responsible",
+		OriginalState: "TRANSPORT / UPSTREAM CONNECTIVITY",
+		CurrentState:  "NOT REPRODUCED",
 		Confidence:  "HIGH",
 		Observations: []Observation{
 			{Kind: KindObserved, Code: "http_status", Message: "HTTP 503 returned by target", OK: boolPtr(false), Level: 2},
@@ -135,6 +137,9 @@ func TestStoreCoalescesSameFingerprint(t *testing.T) {
 	}
 	if got.Inference != "backend is likely responsible" || got.Confidence != "HIGH" {
 		t.Fatalf("inference missing: %+v", got)
+	}
+	if got.OriginalState == "" || got.CurrentState == "" {
+		t.Fatalf("state fields missing: %+v", got)
 	}
 	if len(got.Checks) != 2 {
 		t.Fatalf("checks should project observed facts only, got %+v", got.Checks)

@@ -245,6 +245,8 @@ func reportFrom(rec *jobRecord, traceID string, cached bool) *Report {
 	out.SkipReason = rec.Result.SkipReason
 	out.Inference = rec.Result.Inference
 	out.Conclusion = rec.Result.Inference
+	out.OriginalState = rec.Result.OriginalState
+	out.CurrentState = rec.Result.CurrentState
 	out.Confidence = rec.Result.Confidence
 	out.Observations = rec.Result.Observations
 	out.DurationMs = rec.Result.DurationMs

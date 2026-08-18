@@ -19,6 +19,7 @@ type Target struct {
 	DestPort     string
 	DestPath     string
 	DestURL      string
+	DestType     string
 	RecordedHTTP int
 	CheckType    string
 }
@@ -155,5 +156,30 @@ func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 	if t.Namespace == "" {
 		t.Namespace = "default"
 	}
+	t.DestType = classifyDestinationType(t.DestHost)
 	return t
+}
+
+func classifyDestinationType(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	switch h {
+	case "", "localhost", "127.0.0.1", "::1":
+		if h == "" {
+			return "unknown"
+		}
+		return "localhost"
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		if ip.IsLoopback() {
+			return "localhost"
+		}
+		if ip.IsPrivate() {
+			return "private_ip"
+		}
+		return "external_ip"
+	}
+	if strings.Contains(h, ".svc.") || strings.HasSuffix(h, ".svc") || strings.HasSuffix(h, ".cluster.local") {
+		return "kubernetes_dns"
+	}
+	return "external_dns"
 }

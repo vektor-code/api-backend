@@ -33,8 +33,9 @@ func BuildIntent(trace *models.Trace, diag *tracediag.Diagnosis, clusterID strin
 		SourcePod:         target.SourcePod,
 		Destination:       destination(target),
 		DestinationURL:    target.DestURL,
+		DestinationType:   target.DestType,
 		RecordedHTTP:      target.RecordedHTTP,
-		Checks:            ChecksFor(plan.MaxLevel),
+		Checks:            ChecksFor(target, plan.MaxLevel),
 		MaxLevel:          plan.MaxLevel,
 		TraceID:           traceID(trace, diag),
 		ExpiresAt:         now.Add(jobTTL),
@@ -61,13 +62,15 @@ func investigationType(diag *tracediag.Diagnosis) string {
 
 // ChecksFor is the API's requested set. The agent still allowlists and may
 // refuse http_request when MaxLevel is 1.
-func ChecksFor(maxLevel int) []string {
-	checks := []string{
-		CheckPodStatus,
-		CheckServiceResolution,
-		CheckEndpointHealth,
-		CheckEvents,
-		CheckNetworkPolicy,
+func ChecksFor(target Target, maxLevel int) []string {
+	checks := []string{CheckPodStatus, CheckEvents}
+	switch target.DestType {
+	case "localhost":
+		// Same network namespace/pod context. Service mapping is not applicable.
+	case "external_dns", "external_ip":
+		// External upstreams are not Kubernetes Services in this cluster.
+	default:
+		checks = append(checks, CheckServiceResolution, CheckEndpointHealth, CheckNetworkPolicy)
 	}
 	if maxLevel >= 2 {
 		checks = append(checks, CheckHTTPRequest)
