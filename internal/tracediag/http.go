@@ -48,7 +48,7 @@ func httpMethodRaw(sp *models.Span) (string, bool) {
 }
 
 func httpStatus(sp *models.Span) (int, bool) {
-	raw := attr(sp, "http.response.status_code", "http.status_code")
+	raw := attr(sp, "http.response.status_code", "http.status_code", "http.status")
 	if raw == "" {
 		return 0, false
 	}
@@ -109,10 +109,18 @@ func isHTTPLibrary(sp *models.Span) bool {
 	if lib == "" {
 		return false
 	}
-	return strings.Contains(lib, "/http") ||
-		strings.Contains(lib, "instrumentation-http") ||
-		strings.Contains(lib, "net/http") ||
-		strings.HasSuffix(lib, ".http")
+	return containsAny(lib,
+		"/http", "instrumentation-http", "instrumentation.http", "net/http",
+		"tomcat", "servlet", "jetty", "undertow",
+		"spring-web", "spring-webmvc", "spring-webflux",
+		"okhttp", "apache-httpclient", "apache-httpasyncclient", "java-http-client",
+		"reactor-netty",
+		"aspnetcore", "aspnetcore.mvc",
+		"flask", "django", "fastapi", "starlette", "aiohttp", "httpx", "urllib3", "wsgi", "asgi",
+		"express", "fastify", "koa", "hapi", "undici", "nextjs", "nestjs",
+		"rack", "sinatra", "faraday", "net::http", "action_pack",
+		"laravel", "symfony", "guzzle", "php.auto",
+	) || strings.HasSuffix(lib, ".http") || strings.Contains(lib, "requests")
 }
 
 func isHTTPSpan(sp *models.Span) bool {
@@ -121,9 +129,9 @@ func isHTTPSpan(sp *models.Span) bool {
 	}
 	if attrPresent(sp,
 		"http.request.method", "http.method",
-		"http.response.status_code", "http.status_code",
+		"http.response.status_code", "http.status_code", "http.status",
 		"url.path", "http.target", "http.route", "http.url", "url.full",
-		"http.host", "http.scheme",
+		"http.host", "http.scheme", "url.scheme",
 	) {
 		return true
 	}
@@ -161,42 +169,20 @@ func errorText(sp *models.Span) string {
 		return ""
 	}
 	parts := []string{sp.Error}
-	parts = append(parts, attr(sp, "exception.message", "error.message", "error.msg", "status.message", "message"))
+	for _, k := range []string{"exception.type", "error.type", "exception.message", "error.message", "error.msg", "status.message", "message"} {
+		if v := attr(sp, k); v != "" {
+			parts = append(parts, v)
+		}
+	}
 	if sp.Events != nil {
 		for _, ev := range sp.Events {
 			if ev.Attributes == nil {
 				continue
 			}
-			parts = append(parts, ev.Attributes["exception.message"], ev.Attributes["message"])
+			parts = append(parts, ev.Attributes["exception.type"], ev.Attributes["exception.message"], ev.Attributes["message"])
 		}
 	}
 	return strings.ToLower(strings.Join(parts, " "))
-}
-
-func isTimeoutText(s string) bool {
-	return strings.Contains(s, "timeout") ||
-		strings.Contains(s, "timed out") ||
-		strings.Contains(s, "timedout") ||
-		strings.Contains(s, "etimedout") ||
-		strings.Contains(s, "deadline exceeded") ||
-		strings.Contains(s, "context deadline") ||
-		strings.Contains(s, "i/o timeout")
-}
-
-func isResetText(s string) bool {
-	return strings.Contains(s, "connection reset") ||
-		strings.Contains(s, "econnreset") ||
-		strings.Contains(s, "broken pipe") ||
-		(strings.Contains(s, "wsarecv") && strings.Contains(s, "reset"))
-}
-
-func isRefusedText(s string) bool {
-	return strings.Contains(s, "connection refused") ||
-		strings.Contains(s, "econnrefused") ||
-		strings.Contains(s, "no such host") ||
-		strings.Contains(s, "host unreachable") ||
-		strings.Contains(s, "network is unreachable") ||
-		strings.Contains(s, "no route to host")
 }
 
 func httpStatusName(code int) string {

@@ -57,6 +57,9 @@ func Analyze(trace *models.Trace, opts Options) *Diagnosis {
 	findings = append(findings, ruleInstrumentation(tree)...)
 	findings = append(findings, ruleTransport(tree)...)
 	findings = append(findings, ruleTimeout(tree)...)
+	findings = append(findings, ruleRPC(tree)...)
+	findings = append(findings, ruleDatabase(tree)...)
+	findings = append(findings, ruleMessaging(tree)...)
 	findings = append(findings, ruleHTTPOutcome(tree)...)
 	findings = append(findings, ruleDuplicates(tree)...)
 	findings = append(findings, ruleTraceContext(tree)...)
@@ -400,13 +403,13 @@ func instrumentationFinding(tree spanTree, server *models.Span) (finding, bool) 
 	}
 
 	causes := []string{
-		"HTTP SERVER span lifecycle/return-probe instrumentation anomaly",
-		"corrupted/incomplete HTTP attribute extraction at span completion",
+		"The language agent's HTTP SERVER span closed with incomplete or inconsistent attributes.",
+		"HTTP attribute extraction failed at span completion (empty method/path or a non-HTTP status).",
 	}
 	if malformed > 0 && lifecycle {
 		causes = []string{
-			"HTTP SERVER span lifecycle/return-probe instrumentation anomaly",
-			"corrupted/incomplete HTTP attribute extraction at span completion",
+			"The SERVER span stayed open after the request work finished — a span lifecycle / instrumentation bug in the language agent, not necessarily a slow application.",
+			"HTTP attribute extraction at span completion was incomplete or corrupted.",
 		}
 	}
 
@@ -440,7 +443,7 @@ func ruleTransport(tree spanTree) []finding {
 		status, hasStatus := httpStatus(sp)
 		reset := isResetText(text)
 		refused := isRefusedText(text)
-		clientZero := sp.Kind == models.SpanKindClient && hasStatus && status == 0
+		clientZero := sp.Kind == models.SpanKindClient && hasStatus && !validHTTPStatus(status)
 		missingResponse := sp.Kind == models.SpanKindClient && !hasStatus && (sp.Status == models.SpanStatusError || text != "") && isHTTPSpan(sp) && !isTimeoutText(text)
 
 		if !reset && !refused && !clientZero && !missingResponse {
@@ -588,7 +591,10 @@ func ruleTimeout(tree spanTree) []finding {
 func ruleHTTPOutcome(tree spanTree) []finding {
 	var out []finding
 	for _, sp := range tree.trace.Spans {
-		if sp == nil || sp.Kind != models.SpanKindServer {
+		if sp == nil {
+			continue
+		}
+		if sp.Kind != models.SpanKindServer && sp.Kind != models.SpanKindClient {
 			continue
 		}
 		if !isHTTPSpan(sp) || !validHTTPMethod(sp) || !validHTTPPath(sp) {
@@ -602,7 +608,10 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 			continue
 		}
 
-		down := downstream5xx(tree, sp)
+		down := (*models.Span)(nil)
+		if sp.Kind == models.SpanKindServer {
+			down = downstream5xx(tree, sp)
+		}
 		method, _ := httpMethodRaw(sp)
 		path := httpPath(sp)
 		op := strings.TrimSpace(strings.ToUpper(strings.TrimSpace(method)) + " " + path)
@@ -613,10 +622,14 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 		}
 
 		ids := []string{sp.SpanID}
+		role := "SERVER"
+		if sp.Kind == models.SpanKindClient {
+			role = "CLIENT"
+		}
 		var evidence []Evidence
 		evidence = append(evidence, Evidence{
 			Code:    fmt.Sprintf("http_%d", status),
-			Message: fmt.Sprintf("SERVER %s returned HTTP %d.", op, status),
+			Message: fmt.Sprintf("%s %s returned HTTP %d.", role, op, status),
 			SpanID:  sp.SpanID,
 			Score:   50,
 		})
@@ -663,16 +676,21 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 		summary := fmt.Sprintf("The target service returned HTTP %d for %s.", status, op)
 		causes := []string{fmt.Sprintf("The application itself returned HTTP %d.", status)}
 		rules := []string{"http_5xx"}
-		if status >= 400 && status < 500 {
+		if sp.Kind == models.SpanKindClient && status >= 500 {
+			class = ClassificationDownstreamError
+			score = 82
+			rules = []string{"client_http_5xx"}
+			summary = fmt.Sprintf("%s received HTTP %d from a remote dependency for %s.", sp.ServiceName, status, op)
+			causes = []string{
+				fmt.Sprintf("A remote HTTP dependency returned %d; this is not a local application crash.", status),
+				"Inspect that dependency's traces and logs around this timestamp.",
+			}
+		} else if status >= 400 && status < 500 {
 			class = ClassificationClientError
 			score = 70
 			rules = []string{"http_4xx"}
 			causes = []string{fmt.Sprintf("The server rejected the request with HTTP %d.", status)}
 			summary = fmt.Sprintf("The target service returned HTTP %d for %s.", status, op)
-		} else {
-			if name != "" {
-				summary = fmt.Sprintf("The target service returned HTTP %d for %s.", status, op)
-			}
 		}
 
 		out = append(out, finding{
@@ -685,6 +703,222 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 			spanIDs:        ids,
 			rules:          rules,
 			priority:       70,
+		})
+	}
+	return out
+}
+
+func ruleRPC(tree spanTree) []finding {
+	var out []finding
+	for _, sp := range tree.trace.Spans {
+		if sp == nil || !isRPCSpan(sp) {
+			continue
+		}
+		code, hasCode := grpcStatus(sp)
+		if hasCode && code == 0 {
+			continue
+		}
+		text := errorText(sp)
+		if !hasCode && !failedSpan(sp) {
+			continue
+		}
+		if isHTTPSpan(sp) && !hasCode {
+			continue
+		}
+		name := grpcStatusName(code)
+		title := "RPC failure"
+		if name != "" {
+			title = "gRPC " + name
+		} else if hasCode {
+			title = fmt.Sprintf("gRPC status %d", code)
+		}
+		class := ClassificationApplicationError
+		score := 78
+		priority := 80
+		rules := []string{"rpc_failure"}
+		causes := []string{"The remote RPC/gRPC handler returned a non-OK status.", "Inspect that service's traces for the application-level cause."}
+		switch {
+		case code == 4 || code == 1 || isTimeoutText(text):
+			class = ClassificationTimeout
+			score = 86
+			priority = 92
+			rules = []string{"rpc_timeout"}
+			if title == "RPC failure" {
+				title = "RPC deadline exceeded"
+			}
+			causes = []string{"The RPC did not complete before the caller or server deadline.", "The callee may be slow, overloaded, or blocked on its own downstreams."}
+		case code == 14 || isResetText(text) || isRefusedText(text):
+			class = ClassificationNetworkError
+			score = 84
+			priority = 90
+			rules = []string{"rpc_unavailable"}
+			if title == "RPC failure" {
+				title = "RPC unavailable"
+			}
+			causes = []string{"The RPC endpoint was unavailable (not listening, no healthy backends, or a transport failure).", "Check the destination workload, Service, and NetworkPolicy."}
+		case code == 3 || code == 5 || code == 6 || code == 7 || code == 8 || code == 9 || code == 16:
+			class = ClassificationClientError
+			score = 72
+			priority = 70
+			rules = []string{"rpc_client_error"}
+			causes = []string{"The RPC was rejected as an invalid, unauthorized, or not-found request.", "Fix the caller arguments, metadata, or destination method."}
+		}
+		svc := attr(sp, "rpc.service")
+		method := attr(sp, "rpc.method")
+		op := strings.TrimSpace(svc + "/" + method)
+		if op == "/" {
+			op = sp.Name
+		}
+		summary := fmt.Sprintf("%s RPC %s failed", sp.ServiceName, op)
+		if name != "" {
+			summary = fmt.Sprintf("%s RPC %s failed with %s.", sp.ServiceName, op, name)
+		}
+		evidence := []Evidence{{
+			Code:    "rpc_status",
+			Message: fmt.Sprintf("RPC status %d (%s) on %s.", code, name, op),
+			SpanID:  sp.SpanID,
+			Score:   40,
+		}}
+		if sys := attr(sp, "rpc.system"); sys != "" {
+			evidence = append(evidence, Evidence{Code: "rpc_system", Message: "RPC system is " + sys + ".", SpanID: sp.SpanID, Score: 10})
+		}
+		out = append(out, finding{
+			classification: class,
+			score:          score,
+			title:          title,
+			summary:        summary,
+			evidence:       evidence,
+			causes:         causes,
+			spanIDs:        []string{sp.SpanID},
+			rules:          rules,
+			priority:       priority,
+		})
+	}
+	return out
+}
+
+func ruleDatabase(tree spanTree) []finding {
+	var out []finding
+	for _, sp := range tree.trace.Spans {
+		if sp == nil || !isDBSpan(sp) || !failedSpan(sp) {
+			continue
+		}
+		text := errorText(sp)
+		sys := dbSystem(sp)
+		if sys == "" {
+			sys = "database"
+		}
+		title := "Database error"
+		class := ClassificationApplicationError
+		score := 76
+		priority := 75
+		rules := []string{"database_error"}
+		causes := []string{
+			"The query failed (syntax, missing object, constraint, or permission) — see the reported error.",
+			"The database may be unreachable or its connection pool exhausted.",
+		}
+		switch {
+		case isTimeoutText(text):
+			class = ClassificationTimeout
+			score = 84
+			priority = 92
+			title = "Database timeout"
+			rules = []string{"database_timeout"}
+			causes = []string{"The database did not answer within the client or statement timeout.", "A lock, sequential scan, or saturated connection pool can produce this."}
+		case isResetText(text) || isRefusedText(text) || containsAny(text, "too many connections", "remaining connection slots", "connection pool", "could not translate host"):
+			class = ClassificationNetworkError
+			score = 83
+			priority = 90
+			title = "Database connection failed"
+			rules = []string{"database_connection"}
+			causes = []string{"The process could not open or keep a connection to the database.", "Check host/port, NetworkPolicy, and whether the database pods are Ready."}
+		}
+		summary := fmt.Sprintf("%s failed a %s operation.", sp.ServiceName, sys)
+		evidence := []Evidence{{
+			Code:    "db_system",
+			Message: "Database system is " + sys + ".",
+			SpanID:  sp.SpanID,
+			Score:   20,
+		}}
+		if stmt := attr(sp, "db.statement", "db.query.text"); stmt != "" {
+			if len(stmt) > 180 {
+				stmt = stmt[:180] + "…"
+			}
+			evidence = append(evidence, Evidence{Code: "db_statement", Message: "Query: " + stmt, SpanID: sp.SpanID, Score: 15})
+		}
+		out = append(out, finding{
+			classification: class,
+			score:          score,
+			title:          title,
+			summary:        summary,
+			evidence:       evidence,
+			causes:         causes,
+			spanIDs:        []string{sp.SpanID},
+			rules:          rules,
+			priority:       priority,
+		})
+	}
+	return out
+}
+
+func ruleMessaging(tree spanTree) []finding {
+	var out []finding
+	for _, sp := range tree.trace.Spans {
+		if sp == nil || !isMessagingSpan(sp) || !failedSpan(sp) {
+			continue
+		}
+		text := errorText(sp)
+		sys := attr(sp, "messaging.system")
+		if sys == "" {
+			sys = "message broker"
+		}
+		title := "Messaging error"
+		class := ClassificationApplicationError
+		score := 74
+		priority := 75
+		rules := []string{"messaging_error"}
+		causes := []string{"Publish or consume failed — the topic/queue may be missing or the payload rejected.", "The broker may be unreachable."}
+		switch {
+		case isTimeoutText(text):
+			class = ClassificationTimeout
+			score = 82
+			priority = 92
+			title = "Messaging timeout"
+			rules = []string{"messaging_timeout"}
+			causes = []string{"The broker did not acknowledge the operation in time."}
+		case isResetText(text) || isRefusedText(text):
+			class = ClassificationNetworkError
+			score = 82
+			priority = 90
+			title = "Messaging connection failed"
+			rules = []string{"messaging_connection"}
+			causes = []string{"The process could not connect to the broker. Check bootstrap servers and NetworkPolicy."}
+		}
+		op := "publish to"
+		if sp.Kind == models.SpanKindConsumer {
+			op = "consume from"
+		}
+		dest := attr(sp, "messaging.destination.name", "messaging.destination")
+		summary := fmt.Sprintf("%s failed to %s %s", sp.ServiceName, op, sys)
+		if dest != "" {
+			summary += " destination " + dest
+		}
+		summary += "."
+		out = append(out, finding{
+			classification: class,
+			score:          score,
+			title:          title,
+			summary:        summary,
+			evidence: []Evidence{{
+				Code:    "messaging_system",
+				Message: "Messaging system is " + sys + ".",
+				SpanID:  sp.SpanID,
+				Score:   20,
+			}},
+			causes:   causes,
+			spanIDs:  []string{sp.SpanID},
+			rules:    rules,
+			priority: priority,
 		})
 	}
 	return out
@@ -940,14 +1174,17 @@ func connectFailureEvidence(tree spanTree, sp *models.Span) []Evidence {
 			return
 		}
 		name := strings.ToLower(strings.TrimSpace(c.Name))
-		kind := ""
-		switch {
-		case strings.Contains(name, "tls.connect"):
-			kind = "tls.connect"
-		case strings.Contains(name, "tcp.connect"):
-			kind = "tcp.connect"
-		default:
+		if !isConnectSpanName(name) {
 			return
+		}
+		kind := name
+		switch {
+		case strings.Contains(name, "tls") || strings.Contains(name, "ssl"):
+			kind = "tls.connect"
+		case strings.Contains(name, "tcp") || strings.Contains(name, "net.") || strings.Contains(name, "socket"):
+			kind = "tcp.connect"
+		case strings.Contains(name, "dns"):
+			kind = "dns.lookup"
 		}
 		if c.Status != models.SpanStatusError && errorText(c) == "" {
 			return

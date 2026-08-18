@@ -183,6 +183,9 @@ func DetectLanguageFromSpan(span *models.Span) string {
 		if strings.Contains(sLower, "php") {
 			return "php"
 		}
+		if strings.Contains(sLower, "ruby") || strings.Contains(sLower, "rails") {
+			return "ruby"
+		}
 	}
 
 	// 4. Attribute Key and Value heuristics (nested framework libraries)
@@ -214,6 +217,9 @@ func DetectLanguageFromSpan(span *models.Span) string {
 		if strings.HasPrefix(kLower, "php.") || strings.Contains(vLower, "laravel") || strings.Contains(vLower, "symfony") {
 			return "php"
 		}
+		if strings.HasPrefix(kLower, "ruby.") || strings.Contains(vLower, "rails") || strings.Contains(vLower, "sidekiq") {
+			return "ruby"
+		}
 	}
 
 	// 5. Name heuristics as fallback
@@ -236,31 +242,33 @@ func DetectLanguageFromSpan(span *models.Span) string {
 	if strings.Contains(sName, "php") || strings.Contains(sName, "laravel") || strings.Contains(sName, "symfony") {
 		return "php"
 	}
+	if strings.Contains(sName, "ruby") || strings.Contains(sName, "rails") {
+		return "ruby"
+	}
 
 	return ""
 }
 
 func cleanLanguage(lang string) string {
-	l := strings.ToLower(lang)
-	if strings.Contains(l, "java") {
+	l := strings.ToLower(strings.TrimSpace(lang))
+	switch {
+	case strings.Contains(l, "java") || strings.Contains(l, "jvm") || strings.Contains(l, "kotlin") || strings.Contains(l, "scala"):
 		return "java"
-	}
-	if strings.Contains(l, "node") || strings.Contains(l, "js") || strings.Contains(l, "javascript") || strings.Contains(l, "typescript") {
+	case l == "node" || l == "nodejs" || strings.Contains(l, "javascript") || strings.Contains(l, "typescript") || l == "js" || l == "nodejs":
 		return "nodejs"
-	}
-	if strings.Contains(l, "python") || strings.Contains(l, "cpython") {
+	case strings.Contains(l, "python") || strings.Contains(l, "cpython"):
 		return "python"
-	}
-	if strings.Contains(l, "go") || strings.Contains(l, "golang") {
+	case l == "go" || l == "golang" || strings.HasPrefix(l, "go "):
 		return "go"
-	}
-	if strings.Contains(l, "dotnet") || strings.Contains(l, "c#") || strings.Contains(l, "csharp") {
+	case strings.Contains(l, "dotnet") || strings.Contains(l, "c#") || strings.Contains(l, "csharp"):
 		return "dotnet"
-	}
-	if strings.Contains(l, "php") {
+	case strings.Contains(l, "php"):
 		return "php"
+	case strings.Contains(l, "ruby") || strings.Contains(l, "jruby"):
+		return "ruby"
+	default:
+		return l
 	}
-	return l
 }
 
 func (s *Store) updateRecentTraces(span *models.Span) {

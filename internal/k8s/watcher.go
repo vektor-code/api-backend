@@ -275,7 +275,8 @@ func isFrontendPod(p *corev1.Pod) bool {
 			strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") ||
 			strings.Contains(img, "php") || strings.Contains(img, "fpm") || strings.Contains(img, "laravel") ||
 			strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") ||
-			strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") {
+			strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") ||
+			strings.Contains(img, "ruby") || strings.Contains(img, "rails") {
 			isBackend = true
 			break
 		}
@@ -322,11 +323,17 @@ func detectLanguage(p *corev1.Pod) string {
 		if strings.Contains(img, "python") || strings.Contains(img, "pip") {
 			return "python"
 		}
-		if strings.Contains(img, "go") || strings.Contains(img, "golang") {
-			return "go"
+		if strings.Contains(img, "php") || strings.Contains(img, "php-fpm") {
+			return "php"
+		}
+		if strings.Contains(img, "ruby") || strings.Contains(img, "rails") {
+			return "ruby"
 		}
 		if strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") {
 			return "dotnet"
+		}
+		if strings.Contains(img, "golang") || strings.Contains(img, "/go:") || strings.Contains(img, "/go@") || strings.HasPrefix(img, "go:") {
+			return "go"
 		}
 
 		for _, env := range c.Env {
@@ -339,6 +346,12 @@ func detectLanguage(p *corev1.Pod) string {
 			}
 			if strings.Contains(name, "PYTHON") {
 				return "python"
+			}
+			if strings.Contains(name, "PHP") {
+				return "php"
+			}
+			if strings.Contains(name, "RUBY") || name == "BUNDLE_PATH" {
+				return "ruby"
 			}
 			if strings.Contains(name, "GOPATH") || strings.Contains(name, "GOROOT") {
 				return "go"

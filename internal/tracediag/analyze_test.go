@@ -207,6 +207,33 @@ func TestClientConnectionReset(t *testing.T) {
 	}
 }
 
+func TestClientStatusZeroParentServer503(t *testing.T) {
+	server := tspan("s1", "", models.SpanKindServer, "POST /g/collect", "ilstsdujaxvwapq", 0, 44*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method":       "POST",
+		"http.target":               "/g/collect",
+		"http.response.status_code": "503",
+		"server.address":            "sgtm.biopet.az",
+		"server.port":               "52766",
+	})
+	client := tspan("c1", "s1", models.SpanKindClient, "POST", "ilstsdujaxvwapq", time.Millisecond, 44*time.Millisecond, models.SpanStatusUnset, map[string]string{
+		"http.request.method":       "POST",
+		"http.url":                  "http://sgtm.biopet.az:52766/g/collect",
+		"http.response.status_code": "0",
+		"http.status_code":          "0",
+	})
+	d := mustAnalyze(t, makeTrace("t-sgtm-503", server, client), Options{})
+	requireClass(t, d, ClassificationNetworkError)
+	if d.Title != "Missing HTTP response" {
+		t.Fatalf("title=%q", d.Title)
+	}
+	if !hasEvidence(d, "client_status_zero") {
+		t.Fatalf("expected client_status_zero, got %+v", d.Evidence)
+	}
+	if !hasEvidence(d, "proxy_mapped_transport_failure") {
+		t.Fatalf("expected proxy_mapped_transport_failure, got %+v", d.Evidence)
+	}
+}
+
 func TestClientTimeout(t *testing.T) {
 	client := tspan("c1", "", models.SpanKindClient, "GET /slow", "api", 0, 5*time.Second, models.SpanStatusError, map[string]string{
 		"http.request.method": "GET",
@@ -538,4 +565,127 @@ func TestConfidenceNeverWithoutEvidence(t *testing.T) {
 	if sum == 0 {
 		t.Fatal("evidence scores are all zero")
 	}
+}
+
+func TestJavaSocketTimeout(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "GET", "order-service", 0, 3*time.Second, models.SpanStatusError, map[string]string{
+		"http.request.method":       "GET",
+		"url.full":                  "http://payments:8080/charge",
+		"exception.type":            "java.net.SocketTimeoutException",
+		"exception.message":         "Read timed out",
+		"otel.library.name":         "io.opentelemetry.okhttp-3.0",
+		"telemetry.sdk.language":    "java",
+	})
+	d := mustAnalyze(t, makeTrace("t-java-timeout", client), Options{})
+	requireClass(t, d, ClassificationTimeout)
+}
+
+func TestNodeECONNRESET(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "POST", "api-gateway", 0, 12*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method": "POST",
+		"http.url":            "http://catalog:3000/items",
+		"exception.type":      "Error",
+		"exception.message":   "read ECONNRESET",
+		"otel.library.name":   "@opentelemetry/instrumentation-http",
+	})
+	d := mustAnalyze(t, makeTrace("t-node-reset", client), Options{})
+	requireClass(t, d, ClassificationNetworkError)
+}
+
+func TestPythonConnectionRefused(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "GET", "worker", 0, 8*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method": "GET",
+		"url.full":            "http://inventory:8000/stock",
+		"exception.type":      "requests.exceptions.ConnectionError",
+		"exception.message":   "HTTPConnectionPool(host='inventory', port=8000): Max retries exceeded with url: /stock (Caused by NewConnectionError(\"<urllib3.connection.HTTPConnection object>: Failed to establish a new connection: [Errno 111] Connection refused\"))",
+		"otel.library.name":   "opentelemetry.instrumentation.requests",
+	})
+	d := mustAnalyze(t, makeTrace("t-py-refused", client), Options{})
+	requireClass(t, d, ClassificationNetworkError)
+}
+
+func TestDotnetTaskCanceled(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "GET /orders", "shop-api", 0, 100*time.Second, models.SpanStatusError, map[string]string{
+		"http.request.method":    "GET",
+		"url.path":               "/orders",
+		"exception.type":         "System.Threading.Tasks.TaskCanceledException",
+		"exception.message":      "A task was canceled.",
+		"otel.library.name":      "OpenTelemetry.Instrumentation.Http",
+		"telemetry.sdk.language": "dotnet",
+	})
+	d := mustAnalyze(t, makeTrace("t-dotnet-cancel", client), Options{})
+	requireClass(t, d, ClassificationTimeout)
+}
+
+func TestPHPCurlTimeout(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "POST", "laravel-web", 0, 30*time.Second, models.SpanStatusError, map[string]string{
+		"http.request.method": "POST",
+		"http.url":            "http://billing/invoice",
+		"exception.message":   "cURL error 28: Operation timed out after 30000 milliseconds",
+		"otel.library.name":   "io.opentelemetry.php.auto.laravel",
+	})
+	d := mustAnalyze(t, makeTrace("t-php-curl", client), Options{})
+	requireClass(t, d, ClassificationTimeout)
+}
+
+func TestGRPCUnavailable(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "grpc.health.v1.Health/Check", "frontend", 0, 20*time.Millisecond, models.SpanStatusError, map[string]string{
+		"rpc.system":           "grpc",
+		"rpc.service":          "grpc.health.v1.Health",
+		"rpc.method":           "Check",
+		"rpc.grpc.status_code": "14",
+	})
+	d := mustAnalyze(t, makeTrace("t-grpc-unavail", client), Options{})
+	requireClass(t, d, ClassificationNetworkError)
+	if !strings.Contains(d.Title, "UNAVAILABLE") {
+		t.Fatalf("title=%q", d.Title)
+	}
+}
+
+func TestGRPCDeadlineExceeded(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "billing.Invoice/Issue", "checkout", 0, 5*time.Second, models.SpanStatusError, map[string]string{
+		"rpc.system":           "grpc",
+		"rpc.service":          "billing.Invoice",
+		"rpc.method":           "Issue",
+		"rpc.grpc.status_code": "4",
+	})
+	d := mustAnalyze(t, makeTrace("t-grpc-deadline", client), Options{})
+	requireClass(t, d, ClassificationTimeout)
+}
+
+func TestPostgresConnectionFailed(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "SELECT", "iam-api", 0, 15*time.Millisecond, models.SpanStatusError, map[string]string{
+		"db.system":           "postgresql",
+		"db.name":             "iam",
+		"db.statement":        "SELECT * FROM users WHERE id = $1",
+		"exception.type":      "org.postgresql.util.PSQLException",
+		"exception.message":   "Connection to iam-db:5432 refused",
+		"otel.library.name":   "io.opentelemetry.jdbc",
+		"telemetry.sdk.language": "java",
+	})
+	d := mustAnalyze(t, makeTrace("t-pg-conn", client), Options{})
+	requireClass(t, d, ClassificationNetworkError)
+}
+
+func TestClientOnlyHTTP500(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "GET", "celery-worker", 0, 40*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method":       "GET",
+		"url.path":                  "/v1/charge",
+		"url.full":                  "http://payments:8080/v1/charge",
+		"http.response.status_code": "500",
+		"otel.library.name":         "opentelemetry.instrumentation.requests",
+	})
+	d := mustAnalyze(t, makeTrace("t-worker-500", client), Options{})
+	requireClass(t, d, ClassificationDownstreamError)
+}
+
+func TestTomcatLibraryIsHTTPSpan(t *testing.T) {
+	server := tspan("s1", "", models.SpanKindServer, "/api/orders", "orders", 0, 9*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method":       "GET",
+		"url.path":                  "/api/orders",
+		"http.response.status_code": "500",
+		"otel.library.name":         "io.opentelemetry.tomcat-10.0",
+	})
+	d := mustAnalyze(t, makeTrace("t-tomcat-500", server), Options{})
+	requireClass(t, d, ClassificationApplicationError)
 }
