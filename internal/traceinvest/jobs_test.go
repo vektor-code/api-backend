@@ -11,19 +11,26 @@ import (
 
 func healthzTrace() (*models.Trace, *tracediag.Diagnosis) {
 	now := time.Now()
-	server := &models.Span{
-		TraceID: "t-503", SpanID: "s1", Name: "GET /healthz", ServiceName: "gtm-preview",
-		Namespace: "highping-dev", PodName: "gtm-preview-abc", Kind: models.SpanKindServer,
-		Status: models.SpanStatusError, DurationMs: 0.4, StartTime: now, EndTime: now,
+	client := &models.Span{
+		TraceID: "t-connrefused", SpanID: "c1", Name: "GET /g/collect", ServiceName: "highping-client",
+		Namespace: "highping-dev", PodName: "highping-client-abc", Kind: models.SpanKindClient,
+		Status: models.SpanStatusError, DurationMs: 2.7, StartTime: now, EndTime: now.Add(3 * time.Millisecond),
+		Error:  "connection refused",
 		Attributes: map[string]string{
-			"http.request.method": "GET", "url.path": "/healthz",
-			"url.full":                  "http://10.233.115.249:8080/healthz",
-			"http.response.status_code": "503",
+			"http.request.method":        "GET",
+			"url.path":                   "/g/collect",
+			"url.full":                   "http://10.233.115.249:8080/g/collect",
+			"http.response.status_code": "0",
+			"error.message":             "connection refused",
 		},
 	}
 	tr := &models.Trace{
-		TraceID: "t-503", Cluster: "crtnet-ext-k8s", Namespace: "highping-dev",
-		ServiceName: "gtm-preview", RootSpan: server, Spans: []*models.Span{server},
+		TraceID:     client.TraceID,
+		Cluster:     "crtnet-ext-k8s",
+		Namespace:   client.Namespace,
+		ServiceName: client.ServiceName,
+		RootSpan:    client,
+		Spans:       []*models.Span{client},
 	}
 	return tr, tracediag.Analyze(tr, tracediag.Options{})
 }
@@ -32,15 +39,15 @@ func TestBuildIntentIsEvidenceNotCommand(t *testing.T) {
 	tr, diag := healthzTrace()
 	in, ok := BuildIntent(tr, diag, tr.Cluster, time.Now())
 	if !ok {
-		t.Fatal("503 should produce an investigation intent")
+		t.Fatal("connection refused should produce an investigation intent")
 	}
-	if in.InvestigationType != TypeDownstreamHTTPFailure {
+	if in.InvestigationType != TypeNetworkTimeout {
 		t.Fatalf("type=%s", in.InvestigationType)
 	}
 	if in.Namespace != "highping-dev" || in.Destination != "10.233.115.249:8080" {
 		t.Fatalf("intent=%+v", in)
 	}
-	if in.Fingerprint == "" || in.TraceID != "t-503" {
+	if in.Fingerprint == "" || in.TraceID != "t-connrefused" {
 		t.Fatalf("fingerprint/trace missing: %+v", in)
 	}
 	want := map[string]bool{

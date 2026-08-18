@@ -15,16 +15,25 @@ func TestLivePlanSkipsInstrumentationAnomaly(t *testing.T) {
 }
 
 func TestLivePlanApplicationErrorAllowsExec(t *testing.T) {
-	p := LivePlanFor(&Diagnosis{Classification: ClassificationApplicationError})
-	if !p.Recommended || p.MaxLevel != 3 {
-		t.Fatalf("application 5xx should allow Level 3 fallback, got %+v", p)
+	p := LivePlanFor(&Diagnosis{
+		Classification: ClassificationApplicationError,
+		Confidence:     ConfidenceHigh,
+		Evidence: []Evidence{
+			{Code: "http_503"},
+			{Code: "valid_http_method"},
+			{Code: "valid_url_path"},
+			{Code: "reasonable_duration"},
+		},
+	})
+	if p.Recommended || p.MaxLevel != 0 {
+		t.Fatalf("coherent application errors should stay Level 0, got %+v", p)
 	}
 }
 
 func TestLivePlanClientErrorAPIOnly(t *testing.T) {
 	p := LivePlanFor(&Diagnosis{Classification: ClassificationClientError})
-	if !p.Recommended || p.MaxLevel != 1 {
-		t.Fatalf("4xx should be Level 1 only, got %+v", p)
+	if p.Recommended || p.MaxLevel != 0 {
+		t.Fatalf("4xx should stay Level 0, got %+v", p)
 	}
 }
 
@@ -47,7 +56,7 @@ func TestAnalyzeAttachesLivePlan(t *testing.T) {
 	if d == nil || d.Live == nil {
 		t.Fatal("expected live plan on diagnosis")
 	}
-	if !d.Live.Recommended || d.Live.MaxLevel < 2 {
+	if d.Live.Recommended || d.Live.MaxLevel != 0 {
 		t.Fatalf("503 live plan: %+v", d.Live)
 	}
 
