@@ -48,6 +48,8 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/endpoints", h.ListEndpoints)
 	api.Get("/traces/:id", h.GetTrace)
 	api.Get("/traces/:id/diagnostics", h.GetTraceDiagnostics)
+	api.Get("/traces/:id/failure-diagnosis", h.GetTraceFailureDiagnosis)
+	api.Get("/traces/:id/investigation", h.GetTraceInvestigation)
 	api.Get("/metrics/database", h.GetDatabaseMetrics)
 	api.Get("/metrics/timeseries", h.GetTimeseries)
 	api.Get("/metrics/latency-distribution", h.GetLatencyDistribution)

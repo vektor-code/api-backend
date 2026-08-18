@@ -40,6 +40,7 @@ type PodInfo struct {
 type Watcher struct {
 	client        kubernetes.Interface
 	dynamicClient dynamic.Interface
+	restConfig    *rest.Config
 	pods          map[string]*PodInfo // key: namespace/podname
 	namespaces    []string
 	clusterName   string
@@ -78,11 +79,28 @@ func NewWatcher(kubeconfig string) (*Watcher, error) {
 	w := &Watcher{
 		client:        client,
 		dynamicClient: dynamicClient,
+		restConfig:    config,
 		pods:          make(map[string]*PodInfo),
 	}
 	w.clusterName = w.detectClusterName(context.Background())
 
 	return w, nil
+}
+
+// Client returns the typed Kubernetes client, or nil.
+func (w *Watcher) Client() kubernetes.Interface {
+	if w == nil {
+		return nil
+	}
+	return w.client
+}
+
+// RESTConfig returns the rest config used to build the client, needed for exec.
+func (w *Watcher) RESTConfig() *rest.Config {
+	if w == nil {
+		return nil
+	}
+	return w.restConfig
 }
 
 // Start begins watching all namespaces for pod changes

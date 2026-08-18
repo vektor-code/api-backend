@@ -18,7 +18,17 @@ import (
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/models"
 	"github.com/kubetrace/api-backend/internal/store"
+	"github.com/kubetrace/api-backend/internal/tracediag"
+	"github.com/kubetrace/api-backend/internal/traceinvest"
+	"k8s.io/client-go/kubernetes"
 )
+
+// traceResponse is the GetTrace payload. FailureDiagnosis is derived from the
+// reconstructed spans and is never persisted or written back onto them.
+type traceResponse struct {
+	*models.Trace
+	FailureDiagnosis *tracediag.Diagnosis `json:"failureDiagnosis,omitempty"`
+}
 
 type wsClient struct {
 	conn      *websocket.Conn
@@ -99,18 +109,21 @@ func (h *Hub) writeLoop(cl *wsClient) {
 
 // Handler holds all HTTP handler state
 type Handler struct {
-	store *store.Store
-	k8s   *k8s.Watcher
-	hub   *Hub
+	store  *store.Store
+	k8s    *k8s.Watcher
+	hub    *Hub
+	invest *traceinvest.Investigator
 }
 
 // NewHandler creates the API handler
 func NewHandler(s *store.Store, w *k8s.Watcher) *Handler {
-	return &Handler{
+	h := &Handler{
 		store: s,
 		k8s:   w,
 		hub:   newHub(),
 	}
+	h.invest = traceinvest.New(h.resolveCluster)
+	return h
 }
 
 // OnSpan is called by the collector when a new span arrives — broadcasts live
@@ -357,7 +370,71 @@ func (h *Handler) GetTrace(c *fiber.Ctx) error {
 	if !h.traceVisibleTo(c, trace) {
 		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
 	}
-	return c.JSON(trace)
+	return c.JSON(traceResponse{
+		Trace:            trace,
+		FailureDiagnosis: tracediag.Analyze(trace, tracediag.Options{}),
+	})
+}
+
+// GET /api/traces/:id/failure-diagnosis
+func (h *Handler) GetTraceFailureDiagnosis(c *fiber.Ctx) error {
+	traceID := c.Params("id")
+	trace, err := h.store.GetTrace(traceID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	if trace.Namespace != "" && h.store.IsNamespaceDisabled(trace.Namespace) {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	if !h.traceVisibleTo(c, trace) {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	diag := tracediag.Analyze(trace, tracediag.Options{})
+	if diag == nil {
+		return c.JSON(fiber.Map{"traceId": trace.TraceID, "diagnosis": nil})
+	}
+	return c.JSON(diag)
+}
+
+// GET /api/traces/:id/investigation
+// Active Kubernetes investigator. Never used by GetTrace, so opening a trace
+// stays a telemetry-only render.
+func (h *Handler) GetTraceInvestigation(c *fiber.Ctx) error {
+	traceID := c.Params("id")
+	trace, err := h.store.GetTrace(traceID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	if trace.Namespace != "" && h.store.IsNamespaceDisabled(trace.Namespace) {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	if !h.traceVisibleTo(c, trace) {
+		return c.Status(404).JSON(fiber.Map{"error": "trace not found"})
+	}
+	diag := tracediag.Analyze(trace, tracediag.Options{})
+	if h.invest == nil {
+		return c.JSON(&traceinvest.Report{TraceID: trace.TraceID, Status: traceinvest.StatusUnavailable, SkipReason: "Investigator not configured"})
+	}
+	return c.JSON(h.invest.Investigate(c.Context(), trace, diag))
+}
+
+func (h *Handler) resolveCluster(ctx context.Context, trace *models.Trace) (traceinvest.Cluster, error) {
+	if trace != nil && trace.Cluster != "" {
+		item, err := h.store.GetClusterByID(trace.Cluster)
+		if err == nil && item != nil && item.Token != "" && item.Status == "Active" {
+			cfg, err := k8s.BuildRestConfig(clusterHost(*item), item.Token)
+			if err == nil {
+				client, err := kubernetes.NewForConfig(cfg)
+				if err == nil {
+					return k8s.NewAccess(client, cfg), nil
+				}
+			}
+		}
+	}
+	if h.k8s != nil && h.k8s.Client() != nil {
+		return k8s.NewAccess(h.k8s.Client(), h.k8s.RESTConfig()), nil
+	}
+	return nil, nil
 }
 
 // traceVisibleTo reports whether the caller may see this trace: true when any
