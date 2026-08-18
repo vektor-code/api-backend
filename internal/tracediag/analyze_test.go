@@ -229,6 +229,12 @@ func TestClientETIMEDOUTConnect(t *testing.T) {
 	tls := tspan("c3", "c1", models.SpanKindInternal, "tls.connect", "gtm-server", time.Millisecond, 335*time.Millisecond, models.SpanStatusError, nil)
 	d := mustAnalyze(t, makeTrace("t-etimedout", client, tcp, tls), Options{})
 	requireClass(t, d, ClassificationTimeout)
+	if d.SpanTree != "complete" {
+		t.Fatalf("spanTree=%q, want complete", d.SpanTree)
+	}
+	if !hasEvidence(d, "span_tree_complete") {
+		t.Fatalf("expected span_tree_complete, got %+v", d.Evidence)
+	}
 	if !hasEvidence(d, "timeout_message") {
 		t.Fatalf("expected timeout_message, got %+v", d.Evidence)
 	}
@@ -459,6 +465,9 @@ func TestMissingParent(t *testing.T) {
 	})
 	d := mustAnalyze(t, makeTrace("t-missing-parent", child), Options{})
 	requireClass(t, d, ClassificationTraceContextAnomaly)
+	if d.SpanTree != "broken" {
+		t.Fatalf("spanTree=%q, want broken", d.SpanTree)
+	}
 	if !hasEvidence(d, "missing_parent") {
 		t.Fatalf("evidence=%+v", d.Evidence)
 	}

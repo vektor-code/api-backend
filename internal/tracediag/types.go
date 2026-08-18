@@ -62,6 +62,9 @@ type Diagnosis struct {
 	LikelyCauses    []string       `json:"likelyCauses"`
 	AffectedSpanIDs []string       `json:"affectedSpanIds"`
 	Rules           []string       `json:"rules,omitempty"`
+	// SpanTree is "complete" when every non-root parent ID is present in this
+	// trace, or "broken" when at least one parent was not captured.
+	SpanTree string `json:"spanTree,omitempty"`
 	// Live is a planning hint only. It never waits on Kubernetes.
 	Live *LivePlan `json:"live,omitempty"`
 }

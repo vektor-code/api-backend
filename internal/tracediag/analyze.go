@@ -123,9 +123,54 @@ func toDiagnosis(trace *models.Trace, f finding) *Diagnosis {
 		AffectedSpanIDs: uniqueIDs(f.spanIDs),
 		Rules:           uniqueStrings(f.rules),
 	}
+	attachSpanTree(trace, d)
 	plan := LivePlanFor(d)
 	d.Live = &plan
 	return d
+}
+
+func attachSpanTree(trace *models.Trace, d *Diagnosis) {
+	if d == nil || trace == nil {
+		return
+	}
+	missing := missingParentCount(trace)
+	if missing == 0 {
+		d.SpanTree = "complete"
+		d.Evidence = append(d.Evidence, Evidence{
+			Code:    "span_tree_complete",
+			Message: "All captured spans have their parent in this trace.",
+		})
+		return
+	}
+	d.SpanTree = "broken"
+	if !hasEvidenceCode(d.Evidence, "missing_parent") {
+		d.Evidence = append(d.Evidence, Evidence{
+			Code:    "missing_parent",
+			Message: fmt.Sprintf("%d span(s) reference a parent that was not captured.", missing),
+		})
+	}
+}
+
+func missingParentCount(trace *models.Trace) int {
+	if trace == nil {
+		return 0
+	}
+	ids := make(map[string]struct{}, len(trace.Spans))
+	for _, sp := range trace.Spans {
+		if sp != nil && sp.SpanID != "" {
+			ids[sp.SpanID] = struct{}{}
+		}
+	}
+	n := 0
+	for _, sp := range trace.Spans {
+		if sp == nil || isRootParentID(sp.ParentSpanID) {
+			continue
+		}
+		if _, ok := ids[sp.ParentSpanID]; !ok {
+			n++
+		}
+	}
+	return n
 }
 
 func confidenceFor(score int) Confidence {
@@ -182,6 +227,7 @@ func unknownDiagnosis(trace *models.Trace) *Diagnosis {
 		AffectedSpanIDs: ids,
 		Rules:           []string{"unknown_insufficient_evidence"},
 	}
+	attachSpanTree(trace, d)
 	plan := LivePlanFor(d)
 	d.Live = &plan
 	return d
