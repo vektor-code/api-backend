@@ -413,7 +413,8 @@ func ruleTransport(tree spanTree) []finding {
 		if !reset && !refused && !clientZero && !missingResponse {
 			continue
 		}
-		if isTimeoutText(text) && !reset && !refused && !clientZero {
+		// Timeouts own the classification even when the CLIENT also has status 0.
+		if isTimeoutText(text) && !reset && !refused {
 			continue
 		}
 
@@ -510,9 +511,31 @@ func ruleTimeout(tree spanTree) []finding {
 		if text != "" {
 			evidence = append(evidence, Evidence{Code: "timeout_message", Message: "The span error text reports a timeout or deadline exceeded.", SpanID: sp.SpanID, Score: 25})
 		}
+		for _, ev := range connectFailureEvidence(tree, sp) {
+			evidence = append(evidence, ev)
+		}
+		ids := []string{sp.SpanID}
+		for _, ev := range evidence {
+			if ev.SpanID != "" && ev.SpanID != sp.SpanID {
+				ids = append(ids, ev.SpanID)
+			}
+		}
 		score := 75
+		if len(evidence) > 2 {
+			score += 10
+		}
 		if score > 100 {
 			score = 100
+		}
+		causes := []string{
+			"The target did not answer within the caller or proxy timeout.",
+			"The client timeout may be lower than the normal processing time of this operation.",
+		}
+		if hasEvidenceCode(evidence, "connect_failure") {
+			causes = []string{
+				"The client timed out while connecting or completing TLS to the destination.",
+				"The destination may be unreachable, dropping packets, or too slow to accept the connection.",
+			}
 		}
 		out = append(out, finding{
 			classification: ClassificationTimeout,
@@ -520,13 +543,10 @@ func ruleTimeout(tree spanTree) []finding {
 			title:          title,
 			summary:        summary,
 			evidence:       evidence,
-			causes: []string{
-				"The target did not answer within the caller or proxy timeout.",
-				"The client timeout may be lower than the normal processing time of this operation.",
-			},
-			spanIDs:  []string{sp.SpanID},
-			rules:    []string{"timeout"},
-			priority: 85,
+			causes:         causes,
+			spanIDs:        uniqueIDs(ids),
+			rules:          []string{"timeout"},
+			priority:       92,
 		})
 	}
 	return out
@@ -869,6 +889,83 @@ func targetSuffix(sp *models.Span) string {
 		return " for " + p
 	}
 	return ""
+}
+
+func connectFailureEvidence(tree spanTree, sp *models.Span) []Evidence {
+	if sp == nil {
+		return nil
+	}
+	var out []Evidence
+	seen := map[string]bool{}
+	add := func(c *models.Span) {
+		if c == nil || c.SpanID == sp.SpanID || seen[c.SpanID] {
+			return
+		}
+		name := strings.ToLower(strings.TrimSpace(c.Name))
+		kind := ""
+		switch {
+		case strings.Contains(name, "tls.connect"):
+			kind = "tls.connect"
+		case strings.Contains(name, "tcp.connect"):
+			kind = "tcp.connect"
+		default:
+			return
+		}
+		if c.Status != models.SpanStatusError && errorText(c) == "" {
+			return
+		}
+		seen[c.SpanID] = true
+		out = append(out, Evidence{
+			Code:    "connect_failure",
+			Message: fmt.Sprintf("Related %s span failed while reaching the destination.", kind),
+			SpanID:  c.SpanID,
+			Score:   15,
+		})
+	}
+	for _, c := range tree.children[sp.SpanID] {
+		add(c)
+	}
+	if !isRootParentID(sp.ParentSpanID) {
+		for _, sib := range tree.children[sp.ParentSpanID] {
+			add(sib)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	for _, other := range tree.trace.Spans {
+		if other == nil || other.ServiceName != sp.ServiceName {
+			continue
+		}
+		if other.Kind != models.SpanKindInternal && other.Kind != models.SpanKindClient {
+			continue
+		}
+		if !overlapsLoose(sp, other) {
+			continue
+		}
+		add(other)
+	}
+	return out
+}
+
+func overlapsLoose(a, b *models.Span) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	const skew = 50 * time.Millisecond
+	if a.EndTime.Add(skew).Before(b.StartTime) || b.EndTime.Add(skew).Before(a.StartTime) {
+		return false
+	}
+	return true
+}
+
+func hasEvidenceCode(ev []Evidence, code string) bool {
+	for _, e := range ev {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueIDs(ids []string) []string {

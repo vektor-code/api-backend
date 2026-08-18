@@ -175,6 +175,8 @@ func errorText(sp *models.Span) string {
 func isTimeoutText(s string) bool {
 	return strings.Contains(s, "timeout") ||
 		strings.Contains(s, "timed out") ||
+		strings.Contains(s, "timedout") ||
+		strings.Contains(s, "etimedout") ||
 		strings.Contains(s, "deadline exceeded") ||
 		strings.Contains(s, "context deadline") ||
 		strings.Contains(s, "i/o timeout")
@@ -191,8 +193,9 @@ func isRefusedText(s string) bool {
 	return strings.Contains(s, "connection refused") ||
 		strings.Contains(s, "econnrefused") ||
 		strings.Contains(s, "no such host") ||
-		strings.Contains(s, "dial tcp") ||
-		strings.Contains(s, "host unreachable")
+		strings.Contains(s, "host unreachable") ||
+		strings.Contains(s, "network is unreachable") ||
+		strings.Contains(s, "no route to host")
 }
 
 func httpStatusName(code int) string {

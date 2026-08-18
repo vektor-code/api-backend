@@ -218,6 +218,40 @@ func TestClientTimeout(t *testing.T) {
 	requireClass(t, d, ClassificationTimeout)
 }
 
+func TestClientETIMEDOUTConnect(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "POST /sgtm/a", "gtm-server", 0, 338*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method": "POST",
+		"url.path":            "/sgtm/a",
+		"exception.message":   "ETIMEDOUT",
+	})
+	client.Error = "Exception: ETIMEDOUT"
+	tcp := tspan("c2", "c1", models.SpanKindInternal, "tcp.connect", "gtm-server", time.Millisecond, 335*time.Millisecond, models.SpanStatusError, nil)
+	tls := tspan("c3", "c1", models.SpanKindInternal, "tls.connect", "gtm-server", time.Millisecond, 335*time.Millisecond, models.SpanStatusError, nil)
+	d := mustAnalyze(t, makeTrace("t-etimedout", client, tcp, tls), Options{})
+	requireClass(t, d, ClassificationTimeout)
+	if !hasEvidence(d, "timeout_message") {
+		t.Fatalf("expected timeout_message, got %+v", d.Evidence)
+	}
+	if !hasEvidence(d, "connect_failure") {
+		t.Fatalf("expected connect_failure evidence from tcp/tls.connect, got %+v", d.Evidence)
+	}
+}
+
+func TestClientStatusZeroETIMEDOUTIsTimeoutNotMissingResponse(t *testing.T) {
+	client := tspan("c1", "", models.SpanKindClient, "POST /sgtm/a", "gtm-server", 0, 338*time.Millisecond, models.SpanStatusError, map[string]string{
+		"http.request.method":       "POST",
+		"url.path":                  "/sgtm/a",
+		"http.response.status_code": "0",
+		"exception.message":         "ETIMEDOUT",
+	})
+	client.Error = "ETIMEDOUT"
+	d := mustAnalyze(t, makeTrace("t-etimedout-0", client), Options{})
+	requireClass(t, d, ClassificationTimeout)
+	if hasEvidence(d, "missing_http_response") || hasEvidence(d, "client_status_zero") {
+		t.Fatalf("timeout should own this span, got %+v", d.Evidence)
+	}
+}
+
 func TestDownstream503(t *testing.T) {
 	server := tspan("s1", "", models.SpanKindServer, "GET /page", "frontend", 0, 20*time.Millisecond, models.SpanStatusError, map[string]string{
 		"http.request.method":       "GET",
