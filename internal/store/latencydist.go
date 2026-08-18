@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/kubetrace/api-backend/internal/spantree"
 )
 
 // LatencyBucket is one column of the request-latency histogram.
@@ -176,16 +178,7 @@ func latencyBucketIndex(ms float64) int {
 }
 
 func isRootParent(parent string) bool {
-	parent = strings.TrimSpace(parent)
-	if parent == "" {
-		return true
-	}
-	for _, r := range parent {
-		if r != '0' {
-			return false
-		}
-	}
-	return true
+	return spantree.IsRoot(parent)
 }
 
 func percentileOf(sorted []float64, q float64) float64 {

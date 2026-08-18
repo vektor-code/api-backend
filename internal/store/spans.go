@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/api-backend/internal/spantree"
 	"github.com/kubetrace/shared/connstr"
 	"github.com/kubetrace/shared/spanenrich"
 )
@@ -353,15 +354,7 @@ func (s *Store) updateLocalRecentTraces(span *models.Span) {
 // isRootParentID returns true if the parent span ID indicates this is a root span.
 // OTLP encodes a missing parent as zero bytes; fmt.Sprintf("%x") turns that into "0".
 func isRootParentID(id string) bool {
-	if id == "" {
-		return true
-	}
-	for _, c := range id {
-		if c != '0' {
-			return false
-		}
-	}
-	return true
+	return spantree.IsRoot(id)
 }
 
 // buildTrace assembles a Trace from raw spans
@@ -596,13 +589,18 @@ func entrySpan(spans []*models.Span) *models.Span {
 
 	present := make(map[string]struct{}, len(spans))
 	for _, sp := range spans {
-		present[sp.SpanID] = struct{}{}
+		present[spantree.Normalize(sp.SpanID)] = struct{}{}
 	}
 
 	var bestServer, bestAny *models.Span
 	for _, sp := range spans {
-		if _, hasParent := present[sp.ParentSpanID]; hasParent {
-			continue // not an orphan; its parent is in this trace
+		if !spantree.IsRoot(sp.ParentSpanID) {
+			if _, hasParent := present[spantree.Normalize(sp.ParentSpanID)]; hasParent {
+				continue
+			}
+		} else {
+			// A true root is not an orphan.
+			continue
 		}
 		if bestAny == nil || sp.StartTime.Before(bestAny.StartTime) {
 			bestAny = sp

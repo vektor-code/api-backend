@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/api-backend/internal/spantree"
 	"github.com/kubetrace/shared/httproute"
 )
 
@@ -298,15 +299,7 @@ func spanTimeout(sp *models.Span, opts Options) (time.Duration, bool) {
 }
 
 func isRootParentID(id string) bool {
-	if id == "" {
-		return true
-	}
-	for _, c := range id {
-		if c != '0' {
-			return false
-		}
-	}
-	return true
+	return spantree.IsRoot(id)
 }
 
 func operationIdentity(sp *models.Span) string {

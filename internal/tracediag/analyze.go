@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/api-backend/internal/spantree"
 )
 
 const (
@@ -76,17 +77,18 @@ func buildTree(trace *models.Trace, opts Options) spanTree {
 		if sp == nil || sp.SpanID == "" {
 			continue
 		}
-		byID[sp.SpanID] = sp
+		byID[spantree.Normalize(sp.SpanID)] = sp
 	}
 	for _, sp := range trace.Spans {
 		if sp == nil {
 			continue
 		}
-		if isRootParentID(sp.ParentSpanID) {
+		if spantree.IsRoot(sp.ParentSpanID) {
 			continue
 		}
-		if _, ok := byID[sp.ParentSpanID]; ok {
-			children[sp.ParentSpanID] = append(children[sp.ParentSpanID], sp)
+		parentKey := spantree.Normalize(sp.ParentSpanID)
+		if _, ok := byID[parentKey]; ok {
+			children[parentKey] = append(children[parentKey], sp)
 		}
 	}
 	return spanTree{trace: trace, byID: byID, children: children, opts: opts}
@@ -155,22 +157,7 @@ func missingParentCount(trace *models.Trace) int {
 	if trace == nil {
 		return 0
 	}
-	ids := make(map[string]struct{}, len(trace.Spans))
-	for _, sp := range trace.Spans {
-		if sp != nil && sp.SpanID != "" {
-			ids[sp.SpanID] = struct{}{}
-		}
-	}
-	n := 0
-	for _, sp := range trace.Spans {
-		if sp == nil || isRootParentID(sp.ParentSpanID) {
-			continue
-		}
-		if _, ok := ids[sp.ParentSpanID]; !ok {
-			n++
-		}
-	}
-	return n
+	return len(spantree.Build(trace.Spans).MidTreeMissing)
 }
 
 func confidenceFor(score int) Confidence {
@@ -299,7 +286,7 @@ func instrumentationFinding(tree spanTree, server *models.Span) (finding, bool) 
 		rules = append(rules, "invalid_http_metadata")
 	}
 
-	children := tree.children[server.SpanID]
+	children := tree.children[spantree.Normalize(server.SpanID)]
 	maxChild := 0.0
 	var fastOKClient *models.Span
 	explainingChild := false
@@ -496,7 +483,7 @@ func ruleTransport(tree spanTree) []finding {
 		}
 
 		ids := []string{sp.SpanID}
-		if parent, ok := tree.byID[sp.ParentSpanID]; ok && parent.Kind == models.SpanKindServer {
+		if parent, ok := tree.byID[spantree.Normalize(sp.ParentSpanID)]; ok && parent.Kind == models.SpanKindServer {
 			if pst, okp := httpStatus(parent); okp && pst >= 500 {
 				evidence = append(evidence, Evidence{
 					Code:    "proxy_mapped_transport_failure",
@@ -704,7 +691,7 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 }
 
 func downstream5xx(tree spanTree, server *models.Span) *models.Span {
-	for _, child := range tree.children[server.SpanID] {
+	for _, child := range tree.children[spantree.Normalize(server.SpanID)] {
 		if child.Kind != models.SpanKindClient {
 			if hit := findDescendant5xx(tree, child, server.ServiceName); hit != nil {
 				return hit
@@ -730,7 +717,7 @@ func downstream5xx(tree spanTree, server *models.Span) *models.Span {
 }
 
 func findDescendant5xx(tree spanTree, sp *models.Span, originService string) *models.Span {
-	for _, ch := range tree.children[sp.SpanID] {
+	for _, ch := range tree.children[spantree.Normalize(sp.SpanID)] {
 		st, ok := httpStatus(ch)
 		if ch.Kind == models.SpanKindServer && ok && st >= 500 && st <= 599 && ch.ServiceName != originService {
 			return ch
@@ -852,76 +839,81 @@ func nearlyIdentical(a, b *models.Span) bool {
 
 func ruleTraceContext(tree spanTree) []finding {
 	var out []finding
-	ids := tree.byID
-	for _, sp := range tree.trace.Spans {
-		if sp == nil {
+	forest := spantree.Build(tree.trace.Spans)
+	seenMissing := map[string]bool{}
+	for _, sp := range forest.MidTreeMissing {
+		if sp == nil || seenMissing[sp.SpanID] {
 			continue
 		}
-		if !isRootParentID(sp.ParentSpanID) {
-			if _, ok := ids[sp.ParentSpanID]; !ok {
-				out = append(out, finding{
-					classification: ClassificationTraceContextAnomaly,
-					score:          50,
-					title:          "Missing parent span",
-					summary:        fmt.Sprintf("Span %s references parent %s, which is not present in this trace.", sp.Name, sp.ParentSpanID),
-					evidence: []Evidence{{
-						Code:    "missing_parent",
-						Message: fmt.Sprintf("Parent span %s was not captured.", sp.ParentSpanID),
-						SpanID:  sp.SpanID,
-						Score:   50,
-					}},
-					causes: []string{
-						"The parent span was sampled out, dropped, or never exported.",
-						"Trace context was propagated without the corresponding parent span.",
-					},
-					spanIDs:  []string{sp.SpanID},
-					rules:    []string{"missing_parent"},
-					priority: 40,
-				})
-			} else {
-				parent := ids[sp.ParentSpanID]
-				if sp.StartTime.After(parent.EndTime.Add(time.Duration(timingSkewMs) * time.Millisecond)) {
-					out = append(out, finding{
-						classification: ClassificationTraceContextAnomaly,
-						score:          55,
-						title:          "Impossible parent/child timing",
-						summary:        fmt.Sprintf("Child span %s starts after parent %s has already ended.", sp.Name, parent.Name),
-						evidence: []Evidence{{
-							Code:    "child_starts_after_parent_end",
-							Message: fmt.Sprintf("Child start %s is after parent end %s.", sp.StartTime.UTC().Format(time.RFC3339Nano), parent.EndTime.UTC().Format(time.RFC3339Nano)),
-							SpanID:  sp.SpanID,
-							Score:   55,
-						}},
-						causes: []string{
-							"Clock skew between processes, or a broken parent/child relationship.",
-							"The child was attached to the wrong parent span.",
-						},
-						spanIDs:  []string{parent.SpanID, sp.SpanID},
-						rules:    []string{"broken_parent_child_timing"},
-						priority: 40,
-					})
-				} else if sp.EndTime.After(parent.EndTime.Add(time.Duration(childOutsideMs) * time.Millisecond)) {
-					out = append(out, finding{
-						classification: ClassificationTraceContextAnomaly,
-						score:          45,
-						title:          "Child ends outside parent lifetime",
-						summary:        fmt.Sprintf("Child span %s ends well after parent %s finished.", sp.Name, parent.Name),
-						evidence: []Evidence{{
-							Code:    "child_ends_outside_parent",
-							Message: fmt.Sprintf("Child end %s is after parent end %s.", sp.EndTime.UTC().Format(time.RFC3339Nano), parent.EndTime.UTC().Format(time.RFC3339Nano)),
-							SpanID:  sp.SpanID,
-							Score:   45,
-						}},
-						causes: []string{
-							"The parent span closed before the child finished, which is inconsistent with a real causal wait.",
-							"Clock skew or an instrumentation lifecycle bug.",
-						},
-						spanIDs:  []string{parent.SpanID, sp.SpanID},
-						rules:    []string{"broken_parent_child_timing"},
-						priority: 40,
-					})
-				}
-			}
+		seenMissing[sp.SpanID] = true
+		out = append(out, finding{
+			classification: ClassificationTraceContextAnomaly,
+			score:          50,
+			title:          "Missing parent span",
+			summary:        fmt.Sprintf("Span %s references parent %s, which is not present in this trace.", sp.Name, sp.ParentSpanID),
+			evidence: []Evidence{{
+				Code:    "missing_parent",
+				Message: fmt.Sprintf("Parent span %s was not captured.", sp.ParentSpanID),
+				SpanID:  sp.SpanID,
+				Score:   50,
+			}},
+			causes: []string{
+				"The parent span was sampled out, dropped, or never exported.",
+				"Trace context was propagated without the corresponding parent span.",
+			},
+			spanIDs:  []string{sp.SpanID},
+			rules:    []string{"missing_parent"},
+			priority: 40,
+		})
+	}
+	for _, sp := range tree.trace.Spans {
+		if sp == nil || spantree.IsRoot(sp.ParentSpanID) {
+			continue
+		}
+		parent := tree.byID[spantree.Normalize(sp.ParentSpanID)]
+		if parent == nil {
+			continue
+		}
+		if sp.StartTime.After(parent.EndTime.Add(time.Duration(timingSkewMs) * time.Millisecond)) {
+			out = append(out, finding{
+				classification: ClassificationTraceContextAnomaly,
+				score:          55,
+				title:          "Impossible parent/child timing",
+				summary:        fmt.Sprintf("Child span %s starts after parent %s has already ended.", sp.Name, parent.Name),
+				evidence: []Evidence{{
+					Code:    "child_starts_after_parent_end",
+					Message: fmt.Sprintf("Child start %s is after parent end %s.", sp.StartTime.UTC().Format(time.RFC3339Nano), parent.EndTime.UTC().Format(time.RFC3339Nano)),
+					SpanID:  sp.SpanID,
+					Score:   55,
+				}},
+				causes: []string{
+					"Clock skew between processes, or a broken parent/child relationship.",
+					"The child was attached to the wrong parent span.",
+				},
+				spanIDs:  []string{parent.SpanID, sp.SpanID},
+				rules:    []string{"broken_parent_child_timing"},
+				priority: 40,
+			})
+		} else if sp.EndTime.After(parent.EndTime.Add(time.Duration(childOutsideMs) * time.Millisecond)) {
+			out = append(out, finding{
+				classification: ClassificationTraceContextAnomaly,
+				score:          45,
+				title:          "Child ends outside parent lifetime",
+				summary:        fmt.Sprintf("Child span %s ends well after parent %s finished.", sp.Name, parent.Name),
+				evidence: []Evidence{{
+					Code:    "child_ends_outside_parent",
+					Message: fmt.Sprintf("Child end %s is after parent end %s.", sp.EndTime.UTC().Format(time.RFC3339Nano), parent.EndTime.UTC().Format(time.RFC3339Nano)),
+					SpanID:  sp.SpanID,
+					Score:   45,
+				}},
+				causes: []string{
+					"The parent span closed before the child finished, which is inconsistent with a real causal wait.",
+					"Clock skew or an instrumentation lifecycle bug.",
+				},
+				spanIDs:  []string{parent.SpanID, sp.SpanID},
+				rules:    []string{"broken_parent_child_timing"},
+				priority: 40,
+			})
 		}
 	}
 	return out
@@ -968,11 +960,11 @@ func connectFailureEvidence(tree spanTree, sp *models.Span) []Evidence {
 			Score:   15,
 		})
 	}
-	for _, c := range tree.children[sp.SpanID] {
+	for _, c := range tree.children[spantree.Normalize(sp.SpanID)] {
 		add(c)
 	}
-	if !isRootParentID(sp.ParentSpanID) {
-		for _, sib := range tree.children[sp.ParentSpanID] {
+	if !spantree.IsRoot(sp.ParentSpanID) {
+		for _, sib := range tree.children[spantree.Normalize(sp.ParentSpanID)] {
 			add(sib)
 		}
 	}

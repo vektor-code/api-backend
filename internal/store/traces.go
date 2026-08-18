@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/api-backend/internal/spantree"
 	"github.com/kubetrace/shared/httproute"
 	"github.com/minio/minio-go/v7"
 )
@@ -421,36 +422,11 @@ func buildServiceFlow(spans []*models.Span) []string {
 	if len(spans) == 0 {
 		return nil
 	}
-
-	// Build parent->children index. Spans whose parent was never captured
-	// (uninstrumented hop, sampling, cross-namespace gap) are treated as
-	// roots too, so their subtree still appears in the flow.
-	idSet := make(map[string]bool, len(spans))
-	for _, sp := range spans {
-		idSet[sp.SpanID] = true
-	}
-	childrenMap := make(map[string][]*models.Span)
-	var roots []*models.Span
-	for _, sp := range spans {
-		if isRootParentID(sp.ParentSpanID) || !idSet[sp.ParentSpanID] {
-			roots = append(roots, sp)
-		} else {
-			childrenMap[sp.ParentSpanID] = append(childrenMap[sp.ParentSpanID], sp)
-		}
-	}
-
-	// If no explicit root found, use the earliest span
+	forest := spantree.Build(spans)
+	roots := forest.Roots
 	if len(roots) == 0 {
-		earliestIdx := 0
-		for i, sp := range spans {
-			if sp.StartTime.Before(spans[earliestIdx].StartTime) {
-				earliestIdx = i
-			}
-		}
-		roots = []*models.Span{spans[earliestIdx]}
+		return nil
 	}
-
-	// BFS traversal collecting unique service names in order
 	seen := make(map[string]bool)
 	var flow []string
 	queue := make([]*models.Span, 0, len(spans))
@@ -458,17 +434,21 @@ func buildServiceFlow(spans []*models.Span) []string {
 		return roots[i].StartTime.Before(roots[j].StartTime)
 	})
 	queue = append(queue, roots...)
+	visited := make(map[string]bool, len(spans))
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-
+		key := spantree.Normalize(current.SpanID)
+		if visited[key] {
+			continue
+		}
+		visited[key] = true
 		if !seen[current.ServiceName] {
 			seen[current.ServiceName] = true
 			flow = append(flow, current.ServiceName)
 		}
-
-		children := childrenMap[current.SpanID]
+		children := forest.Children[key]
 		sort.Slice(children, func(i, j int) bool {
 			return children[i].StartTime.Before(children[j].StartTime)
 		})

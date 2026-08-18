@@ -458,18 +458,36 @@ func TestBrokenParentChildTiming(t *testing.T) {
 }
 
 func TestMissingParent(t *testing.T) {
-	child := tspan("c", "missing-parent", models.SpanKindServer, "GET /a", "api", 0, 8*time.Millisecond, models.SpanStatusOK, map[string]string{
+	root := tspan("root", "", models.SpanKindServer, "GET /a", "api", 0, 20*time.Millisecond, models.SpanStatusOK, map[string]string{
 		"http.request.method":       "GET",
 		"url.path":                  "/a",
 		"http.response.status_code": "200",
 	})
-	d := mustAnalyze(t, makeTrace("t-missing-parent", child), Options{})
+	child := tspan("c", "missing-mid", models.SpanKindInternal, "work", "api", 2*time.Millisecond, 8*time.Millisecond, models.SpanStatusOK, nil)
+	d := mustAnalyze(t, makeTrace("t-missing-parent", root, child), Options{})
 	requireClass(t, d, ClassificationTraceContextAnomaly)
 	if d.SpanTree != "broken" {
 		t.Fatalf("spanTree=%q, want broken", d.SpanTree)
 	}
 	if !hasEvidence(d, "missing_parent") {
 		t.Fatalf("evidence=%+v", d.Evidence)
+	}
+}
+
+func TestPartialRemoteRootIsCompleteCapturedTree(t *testing.T) {
+	server := tspan("srv", "browser-never-sent", models.SpanKindServer, "GET /poll", "api", 0, 12*time.Millisecond, models.SpanStatusOK, map[string]string{
+		"http.request.method":       "GET",
+		"url.path":                  "/poll",
+		"http.response.status_code": "200",
+	})
+	client := tspan("c1", "srv", models.SpanKindClient, "GET /api", "api", time.Millisecond, 4*time.Millisecond, models.SpanStatusOK, map[string]string{
+		"http.request.method":       "GET",
+		"url.path":                  "/api",
+		"http.response.status_code": "200",
+	})
+	d := Analyze(makeTrace("t-partial-root", server, client), Options{})
+	if d != nil && d.Classification == ClassificationTraceContextAnomaly {
+		t.Fatalf("missing browser root must not be classified as a broken span tree: %+v", d)
 	}
 }
 
