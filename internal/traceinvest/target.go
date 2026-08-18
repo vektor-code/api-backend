@@ -40,6 +40,14 @@ func attr(sp *models.Span, keys ...string) string {
 	return ""
 }
 
+func destURLOf(sp *models.Span) string {
+	return attr(sp, "url.full", "http.url")
+}
+
+func destHostOf(sp *models.Span) string {
+	return attr(sp, "server.address", "net.peer.name", "net.sock.peer.addr", "http.host")
+}
+
 func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 	t := Target{CheckType: "http"}
 	if trace == nil {
@@ -100,11 +108,11 @@ func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 	}
 
 	urlSpan := focus
-	if client != nil && attr(client, "url.full", "http.url") != "" {
+	if destHostOf(urlSpan) == "" && destURLOf(urlSpan) == "" && client != nil {
 		urlSpan = client
 	}
-	rawURL := attr(urlSpan, "url.full", "http.url")
-	host := attr(urlSpan, "server.address", "net.peer.name", "net.sock.peer.addr", "http.host")
+	rawURL := destURLOf(urlSpan)
+	host := destHostOf(urlSpan)
 	port := attr(urlSpan, "server.port", "net.peer.port")
 	path := attr(urlSpan, "url.path", "http.target", "http.route")
 	if rawURL != "" {

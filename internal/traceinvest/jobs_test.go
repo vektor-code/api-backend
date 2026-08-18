@@ -191,4 +191,31 @@ func TestClaimDoesNotReissueLeasedJob(t *testing.T) {
 	}
 }
 
+func TestExtractTargetUsesAffectedSpanNotFirstClient(t *testing.T) {
+	unrelated := &models.Span{
+		SpanID: "local", Kind: models.SpanKindClient, ServiceName: "ilstsdujaxvwapq",
+		Namespace: "highping-dev", PodName: "pod-a",
+		Attributes: map[string]string{"url.full": "http://127.0.0.1:8080/healthz"},
+	}
+	failed := &models.Span{
+		SpanID: "fail", Kind: models.SpanKindClient, ServiceName: "ilstsdujaxvwapq",
+		Namespace: "highping-dev", PodName: "pod-a",
+		Attributes: map[string]string{
+			"url.full":  "http://sgtm.biopet.az:52766/g/collect",
+			"http.host": "sgtm.biopet.az:52766",
+		},
+	}
+	tr := &models.Trace{
+		TraceID: "t-dest", Namespace: "highping-dev", ServiceName: "ilstsdujaxvwapq",
+		Spans: []*models.Span{unrelated, failed},
+	}
+	got := ExtractTarget(tr, &tracediag.Diagnosis{AffectedSpanIDs: []string{"fail"}})
+	if got.DestHost != "sgtm.biopet.az" || got.DestPort != "52766" {
+		t.Fatalf("dest host/port=%s %s", got.DestHost, got.DestPort)
+	}
+	if got.DestType != "external_dns" {
+		t.Fatalf("type=%s", got.DestType)
+	}
+}
+
 func boolPtr(v bool) *bool { return &v }
