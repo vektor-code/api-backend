@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kubetrace/api-backend/internal/k8s"
+	"github.com/kubetrace/api-backend/internal/license"
 	"github.com/kubetrace/api-backend/internal/models"
 	"github.com/kubetrace/api-backend/internal/store"
 	"github.com/kubetrace/api-backend/internal/tracediag"
@@ -109,10 +110,11 @@ func (h *Hub) writeLoop(cl *wsClient) {
 
 // Handler holds all HTTP handler state
 type Handler struct {
-	store  *store.Store
-	k8s    *k8s.Watcher
-	hub    *Hub
-	invest *traceinvest.Store
+	store       *store.Store
+	k8s         *k8s.Watcher
+	hub         *Hub
+	invest      *traceinvest.Store
+	licenseGate *license.Checker
 }
 
 // NewHandler creates the API handler
@@ -122,6 +124,53 @@ func NewHandler(s *store.Store, w *k8s.Watcher) *Handler {
 		k8s:    w,
 		hub:    newHub(),
 		invest: traceinvest.NewStore(),
+	}
+}
+
+func (h *Handler) SetLicenseGate(checker *license.Checker) {
+	h.licenseGate = checker
+}
+
+func (h *Handler) LicenseStatus(c *fiber.Ctx) error {
+	if h.licenseGate == nil {
+		return c.JSON(fiber.Map{
+			"valid":   true,
+			"status":  "disabled",
+			"message": "License enforcement is not configured.",
+		})
+	}
+	return c.JSON(h.licenseGate.Snapshot())
+}
+
+func (h *Handler) licenseAllowed() bool {
+	return h.licenseGate == nil || h.licenseGate.Allowed()
+}
+
+func LicenseMiddleware(h *Handler) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		path := c.Path()
+		switch path {
+		case "/health", "/ready", "/api/health", "/api/auth/login", "/api/auth/lookup", "/api/auth/refresh", "/api/auth/me", "/api/license":
+			return c.Next()
+		}
+		if h.licenseAllowed() {
+			return c.Next()
+		}
+		snap := h.licenseGate.Snapshot()
+		code := snap.Code
+		if code == "" {
+			code = "LICENSE_EXPIRED"
+		}
+		message := snap.Message
+		if message == "" {
+			message = "license expired"
+		}
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":      message,
+			"code":       code,
+			"status":     snap.Status,
+			"expires_at": snap.ExpiresAt,
+		})
 	}
 }
 
@@ -979,11 +1028,11 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 		investigations = h.invest.Claim(clusterID, 5, time.Now())
 	}
 	return c.JSON(fiber.Map{
-		"enabled":         disabled,
-		"disabled":        []string{},
-		"cluster":         clusterID,
-		"workloads":       workloads,
-		"investigations":  investigations,
+		"enabled":        disabled,
+		"disabled":       []string{},
+		"cluster":        clusterID,
+		"workloads":      workloads,
+		"investigations": investigations,
 	})
 }
 

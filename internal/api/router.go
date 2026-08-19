@@ -21,6 +21,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "Content-Type,Authorization",
 	}))
+	app.Use(LicenseMiddleware(h))
 
 	// Health
 	app.Get("/health", h.Health)
@@ -43,6 +44,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Post("/auth/lookup", h.LookupAccountHandler)
 	api.Post("/auth/refresh", h.RefreshHandler)
 	api.Get("/auth/me", h.GetMeHandler)
+	api.Get("/license", h.LicenseStatus)
 
 	api.Get("/namespaces", h.GetNamespaces)
 	api.Get("/stats", h.GetStats)

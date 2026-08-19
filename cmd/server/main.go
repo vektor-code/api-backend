@@ -14,6 +14,7 @@ import (
 	"github.com/kubetrace/api-backend/internal/api"
 	"github.com/kubetrace/api-backend/internal/collector"
 	"github.com/kubetrace/api-backend/internal/k8s"
+	"github.com/kubetrace/api-backend/internal/license"
 	"github.com/kubetrace/api-backend/internal/store"
 	"github.com/kubetrace/api-backend/internal/vaultenv"
 )
@@ -94,6 +95,16 @@ func main() {
 	}
 
 	handler := api.NewHandler(traceStore, watcher)
+	hostname, _ := os.Hostname()
+	licenseChecker := license.New(license.Config{
+		Product:      "apm",
+		InstanceID:   hostname,
+		InstanceName: hostname,
+		Component:    "api-backend",
+	}, nil)
+	handler.SetLicenseGate(licenseChecker)
+	_ = licenseChecker.Start(context.Background())
+	defer func() { _ = licenseChecker.Stop(context.Background()) }()
 	receiver := collector.NewReceiver(traceStore, sampler, handler.OnSpan)
 
 	if *demoMode {
