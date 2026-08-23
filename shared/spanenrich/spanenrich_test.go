@@ -331,8 +331,32 @@ func TestCLIENTMalformedMethodStillDependencyPath(t *testing.T) {
 	if tags[TagHTTPIdentity] == HTTPIdentityMalformed {
 		t.Fatal("CLIENT must not be marked malformed HTTP SERVER telemetry")
 	}
+	if got.Transaction != "" {
+		t.Fatalf("CLIENT must not mint a transaction name, got %q", got.Transaction)
+	}
+}
+
+func TestJDBCClientDoesNotMintTransaction(t *testing.T) {
+	e := testEnricher(t)
+	tags := map[string]string{
+		"db.system": "postgresql",
+		"db.name":   "dashboard_db",
+	}
+	got := e.Enrich(tags, "dashboard_db", "CLIENT")
+	if got.Transaction != "" {
+		t.Fatalf("JDBC CLIENT Transaction = %q, want empty", got.Transaction)
+	}
+	if tags[TagHTTPIdentity] == HTTPIdentityMalformed {
+		t.Fatal("JDBC CLIENT must not be marked malformed HTTP SERVER telemetry")
+	}
+}
+
+func TestConsumerMintsTransaction(t *testing.T) {
+	e := testEnricher(t)
+	tags := map[string]string{"messaging.system": "kafka"}
+	got := e.Enrich(tags, "my-topic process", "CONSUMER")
 	if got.Transaction == "" {
-		t.Fatal("CLIENT must still follow existing naming, not SERVER identity gating")
+		t.Fatal("CONSUMER must mint a transaction name")
 	}
 }
 

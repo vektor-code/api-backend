@@ -137,12 +137,14 @@ func (s *Store) updateStats(span *models.Span) {
 		}
 	}
 
-	stat.RequestCount++
-	if span.Status == models.SpanStatusError {
-		stat.ErrorCount++
-	}
 	stat.LastSeen = time.Now()
-	updateLatencyEstimates(stat, span.DurationMs)
+	if isRequestSpan(span) {
+		stat.RequestCount++
+		if span.Status == models.SpanStatusError {
+			stat.ErrorCount++
+		}
+		updateLatencyEstimates(stat, span.DurationMs)
+	}
 	finalizeServiceStats(stat)
 }
 
@@ -317,12 +319,14 @@ func (s *Store) updateLocalStats(span *models.Span) {
 		stat.Cluster = span.Cluster
 	}
 
-	stat.RequestCount++
-	if span.Status == models.SpanStatusError {
-		stat.ErrorCount++
-	}
 	stat.LastSeen = time.Now()
-	updateLatencyEstimates(stat, span.DurationMs)
+	if isRequestSpan(span) {
+		stat.RequestCount++
+		if span.Status == models.SpanStatusError {
+			stat.ErrorCount++
+		}
+		updateLatencyEstimates(stat, span.DurationMs)
+	}
 	finalizeServiceStats(stat)
 }
 

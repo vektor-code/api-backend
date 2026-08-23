@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -187,15 +188,16 @@ func chTraceIDPredicate(traceID string) string {
 
 const chRootSpanPredicate = "parent_span_id = '' OR match(parent_span_id, '^0+$')"
 
-// chEndpointRootPredicate is the root-span predicate plus HTTP SERVER identity
-// eligibility. Malformed HTTP SERVER spans stay in the trace; they must not
-// mint Top Transactions identity. Duration aggregation is unchanged.
+// chEndpointRootPredicate is the root-span predicate plus transaction identity
+// eligibility. Database CLIENT/PRODUCER roots and malformed HTTP SERVER spans
+// stay in the trace; they must not mint Top Transactions identity. Duration
+// aggregation is unchanged.
 func chEndpointRootPredicate() string {
-	return "((" + chRootSpanPredicate + ") AND " + httproute.CHHTTPServerIdentityEligible("kind", "tags") + ")"
+	return "((" + chRootSpanPredicate + ") AND " + httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind") + ")"
 }
 
 func chRootTransactionNameExpr() string {
-	return fmt.Sprintf("anyIf(if(transaction_name != '', transaction_name, operation_name), %s)", chRootSpanPredicate)
+	return fmt.Sprintf("anyIf(if(transaction_name != '', transaction_name, operation_name), %s)", chEndpointRootPredicate())
 }
 
 func chOperationHaving(operation string) string {
@@ -357,19 +359,20 @@ func (s *Store) refreshFromClickHouse() {
 	defer cancel()
 
 	// 1. Service statistics with real percentiles.
+	eligible := httproute.CHRequestIdentityEligible("kind", "tags")
 	statsQuery := fmt.Sprintf(`SELECT
 		namespace, service_name,
 		any(cluster) AS cluster,
-		count() AS request_count,
-		countIf(status_code = 'ERROR') AS error_count,
-		quantile(0.5)(duration_ns) / 1e6 AS p50,
-		quantile(0.95)(duration_ns) / 1e6 AS p95,
-		quantile(0.99)(duration_ns) / 1e6 AS p99,
+		countIf(%[1]s) AS request_count,
+		countIf(status_code = 'ERROR' AND (%[1]s)) AS error_count,
+		quantileIf(0.5)(duration_ns, %[1]s) / 1e6 AS p50,
+		quantileIf(0.95)(duration_ns, %[1]s) / 1e6 AS p95,
+		quantileIf(0.99)(duration_ns, %[1]s) / 1e6 AS p99,
 		max(timestamp) AS last_seen,
 		anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] != '') AS sdk_lang
 	FROM kubetrace.spans
-	WHERE timestamp > now64(6) - INTERVAL %d SECOND
-	GROUP BY namespace, service_name`, int(chStatsWindow.Seconds()))
+	WHERE timestamp > now64(6) - INTERVAL %[2]d SECOND
+	GROUP BY namespace, service_name`, eligible, int(chStatsWindow.Seconds()))
 
 	statsRows, err := s.chQuery(ctx, statsQuery)
 	if err != nil {
@@ -396,6 +399,11 @@ func (s *Store) refreshFromClickHouse() {
 		}
 		if lang := chString(row["sdk_lang"]); lang != "" {
 			stat.Language = cleanLanguage(lang)
+		}
+		if reqCount <= 0 || math.IsNaN(stat.P50Ms) || math.IsNaN(stat.P95Ms) || math.IsNaN(stat.P99Ms) {
+			stat.P50Ms = 0
+			stat.P95Ms = 0
+			stat.P99Ms = 0
 		}
 		finalizeServiceStats(stat)
 		newStats[ns+":"+svc] = stat
@@ -516,6 +524,9 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 	}
 	if q.Operation != "" {
 		having = append(having, chOperationHaving(q.Operation))
+	}
+	if q.TraceID == "" {
+		having = append(having, fmt.Sprintf("countIf(%s) > 0", httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind")))
 	}
 	if q.MinSpans > 0 {
 		having = append(having, fmt.Sprintf("count() >= %d", q.MinSpans))

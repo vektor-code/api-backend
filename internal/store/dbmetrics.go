@@ -47,6 +47,7 @@ func (s *Store) chDatabaseQueryMetrics(namespace string, allowedNs []string, win
 		// Only stateful data stores. Gateways and secret stores are dependencies
 		// too, but they are not database queries and do not belong here.
 		"dep_kind IN ('database', 'cache')",
+		"positionCaseInsensitive(tags['thread.name'], 'housekeeper') = 0",
 	}
 	if namespace != "" {
 		where = append(where, fmt.Sprintf("namespace = '%s'", chEscape(namespace)))
@@ -152,6 +153,9 @@ func (s *Store) memDatabaseQueryMetrics(namespace string, allowedNs []string) []
 		}
 		kind := span.Attributes[spanenrich.TagKind]
 		if kind != "database" && kind != "cache" {
+			continue
+		}
+		if isPoolHousekeeper(span.Attributes) {
 			continue
 		}
 

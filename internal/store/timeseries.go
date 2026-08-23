@@ -94,8 +94,8 @@ func (s *Store) chTimeseries(result *TimeseriesData, bucketIdx map[int64]int, na
 		countIf(status_code = 'ERROR') AS errors,
 		avg(duration_ns) / 1e6 AS avg_ms,
 		quantile(0.99)(duration_ns) / 1e6 AS p99_ms,
-		countIf(dep_kind IN ('database', 'cache')) AS db_calls,
-		coalesce(avgIf(duration_ns, dep_kind IN ('database', 'cache')) / 1e6, 0) AS db_avg_ms
+		countIf(dep_kind IN ('database', 'cache') AND positionCaseInsensitive(tags['thread.name'], 'housekeeper') = 0) AS db_calls,
+		coalesce(avgIf(duration_ns, dep_kind IN ('database', 'cache') AND positionCaseInsensitive(tags['thread.name'], 'housekeeper') = 0) / 1e6, 0) AS db_avg_ms
 	FROM kubetrace.spans WHERE %s GROUP BY b ORDER BY b`, step, cond))
 	if err != nil {
 		return nil, err

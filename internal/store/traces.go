@@ -247,6 +247,9 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 		if !q.EndTime.IsZero() && trace.StartTime.After(q.EndTime) {
 			continue
 		}
+		if q.TraceID == "" && !traceHasTransactionIdentity(trace) {
+			continue
+		}
 
 		candidates = append(candidates, candidate{trace.TraceID, trace.StartTime})
 
@@ -406,11 +409,11 @@ func (s *Store) buildTraceListItem(trace *models.Trace) *models.TraceListItem {
 		ErrorType:       errType,
 		ErrorSummary:    errSummary,
 	}
-	if trace.RootSpan != nil {
+	if ident := transactionIdentitySpan(trace); ident != nil {
+		item.RootName = ident.Name
+		item.TransactionName = httproute.TransactionName(ident.Attributes, ident.Name)
+	} else if trace.RootSpan != nil {
 		item.RootName = trace.RootSpan.Name
-		if httproute.HTTPServerIdentityEligible(string(trace.RootSpan.Kind), trace.RootSpan.Attributes) {
-			item.TransactionName = httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name)
-		}
 	}
 	item.Partial = trace.Partial
 	return item

@@ -27,8 +27,11 @@ func TestChTraceIDPredicateKeepsPartialSearch(t *testing.T) {
 
 func TestChEndpointRootPredicateGatesMalformedHTTPServer(t *testing.T) {
 	pred := chEndpointRootPredicate()
-	if !strings.Contains(pred, "upperUTF8(kind) != 'SERVER'") {
-		t.Fatalf("missing SERVER identity gate: %s", pred)
+	if !strings.Contains(pred, "upperUTF8(kind) = 'SERVER'") {
+		t.Fatalf("missing SERVER entrypoint gate: %s", pred)
+	}
+	if !strings.Contains(pred, "CONSUMER") {
+		t.Fatalf("missing CONSUMER entrypoint: %s", pred)
 	}
 	if !strings.Contains(pred, "http.request.method") {
 		t.Fatalf("missing method key: %s", pred)
