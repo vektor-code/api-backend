@@ -64,6 +64,9 @@ type Store struct {
 	reportedNodes   map[string][]ReportedNode
 	reportedNodesMu sync.RWMutex
 
+	reportedInstrumentations   map[string][]ReportedInstrumentation
+	reportedInstrumentationsMu sync.RWMutex
+
 	db              *sql.DB
 	postgresEnabled bool
 

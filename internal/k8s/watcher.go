@@ -376,18 +376,38 @@ func detectLanguage(p *corev1.Pod) string {
 func detectInstrumentation(p *corev1.Pod) (bool, string, string) {
 	if p.Annotations != nil {
 		for k, v := range p.Annotations {
-			if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") {
+			if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") && v != "" && v != "false" {
 				return true, "annotation", fmt.Sprintf("Annotation: %s = %s", k, v)
 			}
 		}
 	}
 	for _, c := range p.Spec.Containers {
 		for _, env := range c.Env {
-			if env.Name == "OTEL_PHP_AUTOLOAD_ENABLED" && env.Value == "true" {
-				return true, "env", "PHP environment variable: OTEL_PHP_AUTOLOAD_ENABLED=true"
-			}
-			if env.Name == "OTEL_TRACES_EXPORTER" && env.Value != "none" {
-				return true, "env", fmt.Sprintf("PHP environment variable: OTEL_TRACES_EXPORTER=%s", env.Value)
+			switch env.Name {
+			case "OTEL_PHP_AUTOLOAD_ENABLED":
+				if env.Value == "true" {
+					return true, "env", "PHP environment variable: OTEL_PHP_AUTOLOAD_ENABLED=true"
+				}
+			case "OTEL_TRACES_EXPORTER":
+				if env.Value != "" && env.Value != "none" {
+					return true, "env", fmt.Sprintf("OTEL_TRACES_EXPORTER=%s", env.Value)
+				}
+			case "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":
+				if env.Value != "" {
+					return true, "env", fmt.Sprintf("%s is set", env.Name)
+				}
+			case "JAVA_TOOL_OPTIONS":
+				if strings.Contains(strings.ToLower(env.Value), "opentelemetry") || strings.Contains(env.Value, "otel") {
+					return true, "env", "Instrumented via JAVA_TOOL_OPTIONS"
+				}
+			case "NODE_OPTIONS":
+				if strings.Contains(strings.ToLower(env.Value), "opentelemetry") {
+					return true, "env", "Instrumented via NODE_OPTIONS"
+				}
+			case "PYTHONPATH":
+				if strings.Contains(strings.ToLower(env.Value), "opentelemetry") {
+					return true, "env", "Instrumented via PYTHONPATH"
+				}
 			}
 		}
 	}
@@ -486,30 +506,10 @@ func (w *Watcher) ReconcileInstrumentation(ctx context.Context, namespace string
 		agentNs = agentNss[0]
 	}
 
-	inst := &unstructured.Unstructured{
-		Object: BuildInstrumentationObject(namespace, agentNs),
+	if err := ApplyInstrumentationCR(ctx, w.dynamicClient, namespace, agentNs); err != nil {
+		return fmt.Errorf("failed to apply instrumentation: %w", err)
 	}
-	inst.SetName(name)
-
-	existing, err := w.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			_, err = w.dynamicClient.Resource(gvr).Namespace(namespace).Create(ctx, inst, metav1.CreateOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to create instrumentation: %w", err)
-			}
-			log.Printf("[k8s] created instrumentation %s in namespace %s", name, namespace)
-			return nil
-		}
-		return fmt.Errorf("failed to check existing instrumentation: %w", err)
-	}
-
-	inst.SetResourceVersion(existing.GetResourceVersion())
-	_, err = w.dynamicClient.Resource(gvr).Namespace(namespace).Update(ctx, inst, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update instrumentation: %w", err)
-	}
-	log.Printf("[k8s] updated instrumentation %s in namespace %s", name, namespace)
+	log.Printf("[k8s] applied instrumentation %s in namespace %s", name, namespace)
 	return nil
 }
 
@@ -721,23 +721,11 @@ func ReconcileRemoteInstrumentation(ctx context.Context, dynClient dynamic.Inter
 		agentNs = agentNamespaces[0]
 	}
 
-	inst := &unstructured.Unstructured{
-		Object: BuildInstrumentationObject(namespace, agentNs),
-	}
-	inst.SetName(name)
-
-	existing, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			_, err = dynClient.Resource(gvr).Namespace(namespace).Create(ctx, inst, metav1.CreateOptions{})
-			return err
-		}
+	if err := ApplyInstrumentationCR(ctx, dynClient, namespace, agentNs); err != nil {
 		return err
 	}
-
-	inst.SetResourceVersion(existing.GetResourceVersion())
-	_, err = dynClient.Resource(gvr).Namespace(namespace).Update(ctx, inst, metav1.UpdateOptions{})
-	return err
+	log.Printf("[k8s/remote] applied remote instrumentation %s in namespace %s", name, namespace)
+	return nil
 }
 
 // GetRemoteNamespaces lists all namespace names on a remote Kubernetes cluster using its host and token/kubeconfig credentials

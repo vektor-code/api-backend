@@ -981,11 +981,12 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 
 	if c.Method() == "POST" {
 		var req struct {
-			Cluster        string               `json:"cluster"`
-			AgentNamespace string               `json:"agentNamespace"`
-			Namespaces     []string             `json:"namespaces"`
-			Pods           []store.ReportedPod  `json:"pods"`
-			Nodes          []store.ReportedNode `json:"nodes"`
+			Cluster           string                         `json:"cluster"`
+			AgentNamespace    string                         `json:"agentNamespace"`
+			Namespaces        []string                       `json:"namespaces"`
+			Pods              []store.ReportedPod            `json:"pods"`
+			Nodes             []store.ReportedNode           `json:"nodes"`
+			Instrumentations  *[]store.ReportedInstrumentation `json:"instrumentations"`
 		}
 		if err := c.BodyParser(&req); err == nil {
 			if req.Cluster != "" {
@@ -1018,6 +1019,9 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 			if len(req.Nodes) > 0 {
 				h.store.SetReportedNodesForCluster(clusterID, req.Nodes)
 				h.store.SetReportedNodes(req.Nodes)
+			}
+			if req.Instrumentations != nil {
+				h.store.SetReportedInstrumentationsForCluster(clusterID, *req.Instrumentations)
 			}
 		}
 	}
@@ -1601,59 +1605,12 @@ func (h *Handler) GetAdminInstrumentations(c *fiber.Ctx) error {
 
 	clusterFilter := c.Query("cluster", "")
 	var all []*k8s.InstrumentationInfo
-
-	// Instrumentation CRDs exist only on agent-managed target clusters, not the monitoring cluster.
-	targetClusters := h.store.GetAgentManagedClusters()
-	if clusterFilter != "" {
-		targetClusters = nil
-		for _, ac := range h.store.GetAgentManagedClusters() {
-			if ac.ClusterID == clusterFilter {
-				targetClusters = append(targetClusters, ac)
-			}
-		}
-		inv, _ := h.store.GetClusterInventory()
-		for _, cluster := range inv {
-			if cluster.ID == clusterFilter && cluster.Token != "" && cluster.Status == "Active" {
-				targetClusters = append(targetClusters, store.AgentClusterInfo{
-					ClusterID:      cluster.ID,
-					AgentNamespace: cluster.AgentNamespace,
-				})
-			}
-		}
+	for _, target := range h.adminInstrumentationTargets(clusterFilter) {
+		all = append(all, h.instrumentationsForCluster(c.Context(), target.ClusterID)...)
 	}
-
-	for _, agentCluster := range targetClusters {
-		inv, _ := h.store.GetClusterInventory()
-		var cluster store.ClusterInventoryItem
-		for _, item := range inv {
-			if item.ID == agentCluster.ClusterID {
-				cluster = item
-				break
-			}
-		}
-		if cluster.Token != "" {
-			_, dynClient, err := k8s.BuildClientsForCluster(clusterHost(cluster), cluster.Token)
-			if err == nil {
-				remote, err := k8s.GetRemoteInstrumentations(c.Context(), dynClient)
-				if err == nil {
-					for _, inst := range remote {
-						inst.Name = fmt.Sprintf("[%s] %s", agentCluster.ClusterID, inst.Name)
-						all = append(all, inst)
-					}
-				}
-			}
-		}
-	}
-
 	if all == nil {
 		all = []*k8s.InstrumentationInfo{}
 	}
-	for _, inst := range all {
-		if h.store.IsNamespaceDisabled(inst.Namespace) {
-			inst.Sampler = "always_off"
-		}
-	}
-
 	return c.JSON(fiber.Map{"instrumentations": all})
 }
 

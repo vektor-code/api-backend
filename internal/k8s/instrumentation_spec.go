@@ -10,13 +10,15 @@ import (
 // stable releases and are overridable per-language via env vars. Old Python
 // images bundle a typing_extensions without Sentinel, which breaks pydantic apps.
 var instrumentationImages = struct {
-	java, nodejs, python, dotnet, golang string
+	java, nodejs, python, dotnet, golang, nginx, apache string
 }{
-	java:   envOr("OTEL_JAVA_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.30.0"),
+	java:   envOr("OTEL_JAVA_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.31.0"),
 	nodejs: envOr("OTEL_NODEJS_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:0.78.0"),
 	python: envOr("OTEL_PYTHON_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:0.64b0"),
 	dotnet: envOr("OTEL_DOTNET_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-dotnet:1.16.0"),
 	golang: envOr("OTEL_GO_IMAGE", "ghcr.io/open-telemetry/opentelemetry-go-instrumentation/autoinstrumentation-go:v0.24.0"),
+	nginx:  envOr("OTEL_NGINX_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd:1.0.4"),
+	apache: envOr("OTEL_APACHE_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd:1.0.4"),
 }
 
 func envOr(key, fallback string) string {
@@ -120,12 +122,54 @@ func InstrumentationName(namespace string) string {
 
 // BuildInstrumentationObject returns an OpenTelemetry Instrumentation CR matching the platform standard.
 func BuildInstrumentationObject(namespace, agentNamespace string) map[string]interface{} {
+	return buildInstrumentationObjectOpts(namespace, agentNamespace, false)
+}
+
+// BuildCompatibleInstrumentationObject omits fields some operator 0.58
+// installs reject so remote CR create still succeeds.
+func BuildCompatibleInstrumentationObject(namespace, agentNamespace string) map[string]interface{} {
+	return buildInstrumentationObjectOpts(namespace, agentNamespace, true)
+}
+
+func buildInstrumentationObjectOpts(namespace, agentNamespace string, compatible bool) map[string]interface{} {
 	if agentNamespace == "" {
 		agentNamespace = AgentNamespaceFallback()
 	}
 	name := InstrumentationName(namespace)
 	grpcEndpoint := fmt.Sprintf("http://agent-backend.%s.svc.cluster.local:4317", agentNamespace)
 	httpEndpoint := fmt.Sprintf("http://agent-backend.%s.svc.cluster.local:4318", agentNamespace)
+
+	propagators := []interface{}{"tracecontext", "baggage", "b3"}
+	if !compatible {
+		propagators = append(propagators, "jaeger")
+	}
+
+	spec := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"endpoint": grpcEndpoint,
+		},
+		"propagators": propagators,
+		"sampler":     otelSampler(),
+		"env":         optimizedInstrumentationEnv(),
+		"java":        languageInstrumentationSpec(instrumentationImages.java),
+		"nodejs":      languageInstrumentationSpec(instrumentationImages.nodejs),
+		"python":      pythonInstrumentationSpec(instrumentationImages.python, httpEndpoint),
+		"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
+		"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint),
+	}
+	if !compatible {
+		spec["resource"] = map[string]interface{}{
+			"addK8sUIDAttributes": true,
+		}
+		spec["nginx"] = map[string]interface{}{
+			"image": instrumentationImages.nginx,
+			"env":   pythonInstrumentationEnv(httpEndpoint),
+		}
+		spec["apacheHttpd"] = map[string]interface{}{
+			"image": instrumentationImages.apache,
+			"env":   pythonInstrumentationEnv(httpEndpoint),
+		}
+	}
 
 	return map[string]interface{}{
 		"apiVersion": "opentelemetry.io/v1alpha1",
@@ -134,28 +178,6 @@ func BuildInstrumentationObject(namespace, agentNamespace string) map[string]int
 			"name":      name,
 			"namespace": namespace,
 		},
-		"spec": map[string]interface{}{
-			"exporter": map[string]interface{}{
-				"endpoint": grpcEndpoint,
-			},
-			"propagators": []interface{}{
-				"tracecontext",
-				"baggage",
-				"b3",
-				"jaeger",
-			},
-			"sampler": otelSampler(),
-			"env":     optimizedInstrumentationEnv(),
-			"resource": map[string]interface{}{
-				"addK8sUIDAttributes": true,
-			},
-			"java":        languageInstrumentationSpec(instrumentationImages.java),
-			"nodejs":      languageInstrumentationSpec(instrumentationImages.nodejs),
-			"python":      pythonInstrumentationSpec(instrumentationImages.python, httpEndpoint),
-			"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
-			"nginx":       map[string]interface{}{"env": pythonInstrumentationEnv(httpEndpoint)},
-			"apacheHttpd": map[string]interface{}{"env": pythonInstrumentationEnv(httpEndpoint)},
-			"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint),
-		},
+		"spec": spec,
 	}
 }

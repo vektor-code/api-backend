@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -385,32 +384,13 @@ func (h *Handler) GetClusterInstrumentations(c *fiber.Ctx) error {
 		return err
 	}
 	clusterID := c.Params("id")
-	cluster, err := h.store.GetClusterByID(clusterID)
-	if err != nil {
+	if _, err := h.store.GetClusterByID(clusterID); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
-	}
-
-	var list []*k8s.InstrumentationInfo
-	if cluster.Token != "" {
-		_, dynClient, err := k8s.BuildClientsForCluster(clusterHost(*cluster), cluster.Token)
-		if err == nil {
-			list, _ = k8s.GetRemoteInstrumentations(c.Context(), dynClient)
-		}
-	}
-
-	if list == nil {
-		list = []*k8s.InstrumentationInfo{}
-	}
-	for _, inst := range list {
-		inst.Name = fmt.Sprintf("[%s] %s", clusterID, inst.Name)
-		if h.store.IsNamespaceDisabledForCluster(clusterID, inst.Namespace) {
-			inst.Sampler = "always_off"
-		}
 	}
 
 	return c.JSON(fiber.Map{
 		"cluster":          clusterID,
-		"instrumentations": list,
+		"instrumentations": h.instrumentationsForCluster(c.Context(), clusterID),
 	})
 }
 

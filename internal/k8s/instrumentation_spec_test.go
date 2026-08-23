@@ -31,6 +31,16 @@ func TestBuildInstrumentationObjectUsesFastExport(t *testing.T) {
 	}
 }
 
+func TestBuildCompatibleInstrumentationObjectOmitsOptionalFields(t *testing.T) {
+	spec := BuildCompatibleInstrumentationObject("troni-dev", "crnet-apm")["spec"].(map[string]interface{})
+	if _, ok := spec["apacheHttpd"]; ok {
+		t.Fatal("compatible spec should omit apacheHttpd")
+	}
+	if _, ok := spec["java"]; !ok {
+		t.Fatal("compatible spec should still include java")
+	}
+}
+
 func envValue(env []interface{}, name string) string {
 	for _, item := range env {
 		kv, ok := item.(map[string]interface{})
