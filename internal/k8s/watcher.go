@@ -258,119 +258,14 @@ func getPodApp(p *corev1.Pod) string {
 }
 
 func isFrontendPod(p *corev1.Pod) bool {
-	// 1. If it has OTel auto-instrumentation annotations, it is definitely a backend microservice
-	if p.Annotations != nil {
-		for k, v := range p.Annotations {
-			if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") && v != "" {
-				return false
-			}
-		}
-	}
-
-	// 2. Check for backend runtimes or environment configurations
-	isBackend := false
-	for _, c := range p.Spec.Containers {
-		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") ||
-			strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") ||
-			strings.Contains(img, "php") || strings.Contains(img, "fpm") || strings.Contains(img, "laravel") ||
-			strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") ||
-			strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") ||
-			strings.Contains(img, "ruby") || strings.Contains(img, "rails") {
-			isBackend = true
-			break
-		}
-		for _, env := range c.Env {
-			envName := strings.ToUpper(env.Name)
-			if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") ||
-				strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") ||
-				strings.Contains(envName, "POSTGRES") || strings.Contains(envName, "MONGO") ||
-				strings.Contains(envName, "RABBITMQ") || strings.Contains(envName, "SPRING_") {
-				isBackend = true
-				break
-			}
-		}
-		if isBackend {
-			break
-		}
-	}
-	if isBackend {
-		return false
-	}
-
-	// 3. Static server detection
-	for _, c := range p.Spec.Containers {
-		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "nginx") || strings.Contains(img, "caddy") || strings.Contains(img, "httpd") || strings.Contains(img, "apache") {
-			return true
-		}
-	}
-	return false
+	return isStaticHTTPStack(detectLanguage(p))
 }
 
 func detectLanguage(p *corev1.Pod) string {
-	for _, c := range p.Spec.Containers {
-		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "nginx") || strings.Contains(img, "openresty") {
-			return "nginx"
-		}
-		if strings.Contains(img, "httpd") || strings.Contains(img, "apache2") {
-			return "apache-httpd"
-		}
-	}
-	if isFrontendPod(p) {
+	if p == nil {
 		return ""
 	}
-	for _, c := range p.Spec.Containers {
-		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "jre") || strings.Contains(img, "tomcat") || strings.Contains(img, "spring") || strings.Contains(img, "temurin") || strings.Contains(img, "corretto") || strings.Contains(img, "graalvm") || strings.Contains(img, "distroless/java") {
-			return "java"
-		}
-		if strings.Contains(img, "node") || strings.Contains(img, "npm") {
-			return "node"
-		}
-		if strings.Contains(img, "python") || strings.Contains(img, "pip") {
-			return "python"
-		}
-		if strings.Contains(img, "php") || strings.Contains(img, "php-fpm") {
-			return "php"
-		}
-		if strings.Contains(img, "ruby") || strings.Contains(img, "rails") {
-			return "ruby"
-		}
-		if strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") {
-			return "dotnet"
-		}
-		if strings.Contains(img, "golang") || strings.Contains(img, "/go:") || strings.Contains(img, "/go@") || strings.HasPrefix(img, "go:") {
-			return "go"
-		}
-
-		for _, env := range c.Env {
-			name := strings.ToUpper(env.Name)
-			if strings.Contains(name, "JAVA") {
-				return "java"
-			}
-			if strings.Contains(name, "NODE") {
-				return "node"
-			}
-			if strings.Contains(name, "PYTHON") {
-				return "python"
-			}
-			if strings.Contains(name, "PHP") {
-				return "php"
-			}
-			if strings.Contains(name, "RUBY") || name == "BUNDLE_PATH" {
-				return "ruby"
-			}
-			if strings.Contains(name, "GOPATH") || strings.Contains(name, "GOROOT") {
-				return "go"
-			}
-			if strings.Contains(name, "DOTNET") {
-				return "dotnet"
-			}
-		}
-	}
-	return ""
+	return resolveLanguage("", p.Spec.Containers)
 }
 
 func detectInstrumentation(p *corev1.Pod) (bool, string, string) {
@@ -436,36 +331,8 @@ func podToInfo(p *corev1.Pod) *PodInfo {
 	}
 }
 
-func (w *Watcher) isFrontendService(namespace, serviceName string) bool {
-	if w.client == nil {
-		return false
-	}
-	ingresses, err := w.client.NetworkingV1().Ingresses(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err == nil {
-		for _, ing := range ingresses.Items {
-			if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil && ing.Spec.DefaultBackend.Service.Name == serviceName {
-				return true
-			}
-			for _, rule := range ing.Spec.Rules {
-				if rule.HTTP == nil {
-					continue
-				}
-				for _, path := range rule.HTTP.Paths {
-					if (path.Path == "/" || path.Path == "" || path.Path == "/*") && path.Backend.Service != nil && path.Backend.Service.Name == serviceName {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
-// GetLanguageForService returns the dynamically detected language of a service
+// GetLanguageForService returns the assigned/detected stack of a service.
 func (w *Watcher) GetLanguageForService(namespace, serviceName string) string {
-	if w.isFrontendService(namespace, serviceName) {
-		return ""
-	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	for _, pod := range w.pods {

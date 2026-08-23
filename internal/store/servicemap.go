@@ -291,9 +291,6 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 	}
 
 	for _, p := range reportedPods {
-		if p.IsFrontend {
-			continue
-		}
 		if disabledMap[p.Namespace] {
 			continue
 		}

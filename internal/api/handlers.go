@@ -286,10 +286,6 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 			nsMap[p.Namespace] = nsStat
 		}
 
-		if p.IsFrontend {
-			continue
-		}
-
 		svcName := p.ServiceName()
 		if svcName == "" {
 			continue
@@ -565,9 +561,6 @@ func (h *Handler) GetServices(c *fiber.Ctx) error {
 	}
 
 	for _, p := range reportedPods {
-		if p.IsFrontend {
-			continue
-		}
 		if h.store.IsNamespaceDisabled(p.Namespace) || !nsAllowed(allowed, p.Namespace) {
 			continue
 		}
@@ -698,9 +691,6 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 	remotePods := h.store.GetReportedPods(ns)
 	if len(remotePods) > 0 {
 		for _, p := range remotePods {
-			if p.IsFrontend {
-				continue
-			}
 			enrichedPods = append(enrichedPods, PodMetricInfo{
 				Name:                p.Name,
 				Namespace:           p.Namespace,
@@ -721,9 +711,6 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 	} else if len(pods) > 0 {
 		// Use real pods from K8s API watcher (local cluster)
 		for _, p := range pods {
-			if p.IsFrontend {
-				continue
-			}
 			enrichedPods = append(enrichedPods, PodMetricInfo{
 				Name:                p.Name,
 				Namespace:           p.Namespace,

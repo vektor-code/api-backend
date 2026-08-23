@@ -8,10 +8,17 @@ import (
 	"time"
 )
 
-// forceKeepTTL is how long a trace stays force-sampled after an error span,
-// so the rest of its spans (across services and namespaces) are kept and the
-// full flow stays intact instead of only the error span surviving sampling.
-const forceKeepTTL = 5 * time.Minute
+// traceDecisionTTL is how long a keep/drop decision sticks for a trace ID so
+// later spans from other services or namespaces cannot be sampled differently
+// and show up as skipped parents in the waterfall.
+const traceDecisionTTL = 5 * time.Minute
+
+type pinnedDecision struct {
+	keep          bool
+	expiry        time.Time
+	probability   float64
+	adjustedCount float64
+}
 
 // Attributes recording the sampling weight of a span. They are only written
 // when a span was kept probabilistically, so unsampled telemetry carries no
@@ -30,7 +37,10 @@ type AdaptiveSampler struct {
 	windowSize   time.Duration
 	stopChan     chan struct{}
 
-	forceKeep sync.Map // traceID -> expiry time.Time; traces pinned by an error span
+	// Sticky keep/drop so a trace that already crossed services (and
+	// namespaces) cannot lose mid-tree spans when the adaptive ratio
+	// changes between batches.
+	decisions sync.Map // traceID -> pinnedDecision
 }
 
 // NewAdaptiveSampler initializes and starts the adaptive sampling loop
@@ -73,51 +83,70 @@ func (s *AdaptiveSampler) ShouldSample(traceID string, isError bool) bool {
 func (s *AdaptiveSampler) Sample(traceID string, isError bool) SampleDecision {
 	atomic.AddInt64(&s.spansCount, 1)
 
-	// Always sample error spans, and pin the whole trace so its remaining
-	// spans are kept too — otherwise multi-service/multi-namespace flows
-	// would show only the failing span with no surrounding context.
-	//
-	// Deterministically kept spans represent only themselves; giving them the
-	// probabilistic weight would inflate error counts by the sampling factor.
+	// Errors always keep the whole trace. Giving them the probabilistic
+	// weight would inflate error counts by the sampling factor.
 	if isError {
-		s.forceKeep.Store(traceID, time.Now().Add(forceKeepTTL))
+		d := keptExactly()
+		s.pin(traceID, d)
 		atomic.AddInt64(&s.spansSampled, 1)
-		return keptExactly()
+		return d
 	}
-	if exp, ok := s.forceKeep.Load(traceID); ok {
-		if t, ok := exp.(time.Time); ok && time.Now().Before(t) {
+	if d, ok := s.pinned(traceID); ok {
+		if d.Keep {
 			atomic.AddInt64(&s.spansSampled, 1)
-			return keptExactly()
 		}
-		s.forceKeep.Delete(traceID)
+		return d
 	}
 
 	ratio := atomic.LoadUint32(&s.currentRatio)
-	if ratio >= 10000 {
-		atomic.AddInt64(&s.spansSampled, 1)
-		return keptExactly()
-	}
-	if ratio == 0 {
-		return SampleDecision{}
-	}
-
-	// Lock-free FNV-1a hashing of the trace ID
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(traceID))
-	hashVal := h.Sum32()
-
-	// Compare against dynamic sampling ratio (in basis points)
-	if (hashVal % 10000) < ratio {
-		atomic.AddInt64(&s.spansSampled, 1)
-		probability := float64(ratio) / 10000.0
-		return SampleDecision{
-			Keep:          true,
-			Probability:   probability,
-			AdjustedCount: 1 / probability,
+	var d SampleDecision
+	switch {
+	case ratio >= 10000:
+		d = keptExactly()
+	case ratio == 0:
+		d = SampleDecision{}
+	default:
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(traceID))
+		if (h.Sum32() % 10000) < ratio {
+			probability := float64(ratio) / 10000.0
+			d = SampleDecision{
+				Keep:          true,
+				Probability:   probability,
+				AdjustedCount: 1 / probability,
+			}
 		}
 	}
+	s.pin(traceID, d)
+	if d.Keep {
+		atomic.AddInt64(&s.spansSampled, 1)
+	}
+	return d
+}
 
-	return SampleDecision{}
+func (s *AdaptiveSampler) pin(traceID string, d SampleDecision) {
+	s.decisions.Store(traceID, pinnedDecision{
+		keep:          d.Keep,
+		expiry:        time.Now().Add(traceDecisionTTL),
+		probability:   d.Probability,
+		adjustedCount: d.AdjustedCount,
+	})
+}
+
+func (s *AdaptiveSampler) pinned(traceID string) (SampleDecision, bool) {
+	v, ok := s.decisions.Load(traceID)
+	if !ok {
+		return SampleDecision{}, false
+	}
+	p, ok := v.(pinnedDecision)
+	if !ok || time.Now().After(p.expiry) {
+		s.decisions.Delete(traceID)
+		return SampleDecision{}, false
+	}
+	if !p.keep {
+		return SampleDecision{}, true
+	}
+	return SampleDecision{Keep: true, Probability: p.probability, AdjustedCount: p.adjustedCount}, true
 }
 
 func keptExactly() SampleDecision {
@@ -138,11 +167,10 @@ func (s *AdaptiveSampler) runAdjuster() {
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
-			// Evict expired force-kept traces
 			now := time.Now()
-			s.forceKeep.Range(func(k, v any) bool {
-				if t, ok := v.(time.Time); ok && now.After(t) {
-					s.forceKeep.Delete(k)
+			s.decisions.Range(func(k, v any) bool {
+				if p, ok := v.(pinnedDecision); ok && now.After(p.expiry) {
+					s.decisions.Delete(k)
 				}
 				return true
 			})

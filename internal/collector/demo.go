@@ -66,14 +66,7 @@ func (d *DemoGenerator) generateTrace() {
 
 	// Dynamically discover services from Kubernetes pod labels
 	rawServices := d.store.GetServicesForNamespace(ns)
-	var services []string
-	for _, svc := range rawServices {
-		svcLower := strings.ToLower(svc)
-		if strings.Contains(svcLower, "frontend") || strings.Contains(svcLower, "ui") || strings.Contains(svcLower, "client") {
-			continue
-		}
-		services = append(services, svc)
-	}
+	services := append([]string{}, rawServices...)
 	if len(services) == 0 {
 		return
 	}
@@ -158,7 +151,8 @@ func (d *DemoGenerator) generateTrace() {
 
 		d.saveAndBroadcast(child)
 
-		if rand.Float64() < 0.6 && !strings.Contains(svc, "-frontend") {
+		lang := d.getServiceLanguageFromK8s(ns, svc)
+		if rand.Float64() < 0.6 && lang != "nginx" && lang != "apache-httpd" {
 			dbDuration := 1 + rand.Float64()*childDuration*0.6
 			dbStart := childStart.Add(2 * time.Millisecond)
 			dbSpan := &models.Span{
@@ -228,10 +222,6 @@ func (d *DemoGenerator) getServiceLanguageFromK8s(ns, svc string) string {
 	}
 
 	// Fallback: name-based heuristics
-	s := strings.ToLower(svc)
-	if strings.Contains(s, "frontend") || strings.Contains(s, "ui") || strings.Contains(s, "client") {
-		return ""
-	}
 	return "go"
 }
 

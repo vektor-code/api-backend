@@ -183,14 +183,6 @@ func (h *Handler) GetClusterNamespaces(c *fiber.Ctx) error {
 	})
 }
 
-// isFrontendWorkload flags static/browser frontends (e.g. nginx-served SPAs) that the
-// OTel Operator's server-side auto-injection cannot instrument — there's no backend
-// process in the container to attach an SDK to, so these are excluded from the
-// instrumentable applications list rather than offered a language and silently no-op'd.
-func isFrontendWorkload(w k8s.WorkloadInfo) bool {
-	return w.IsFrontend
-}
-
 // GET /api/admin/clusters/:id/namespaces/:namespace/applications
 func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 	if err := h.requireAdmin(c); err != nil {

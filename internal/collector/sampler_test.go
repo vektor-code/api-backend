@@ -53,6 +53,49 @@ func TestAdaptiveSampler_SamplingDecisions(t *testing.T) {
 	}
 }
 
+func TestAdaptiveSampler_TraceDecisionSticksAcrossRatioChange(t *testing.T) {
+	sampler := NewAdaptiveSampler(100, time.Hour)
+	defer sampler.Stop()
+
+	traceID := "cross-ns-trace-keep-me"
+	if !sampler.ShouldSample(traceID, false) {
+		t.Fatal("expected first span kept at 100% ratio")
+	}
+
+	atomic.StoreUint32(&sampler.currentRatio, 100) // 1%
+	for i := 0; i < 20; i++ {
+		if !sampler.ShouldSample(traceID, false) {
+			t.Fatalf("later span %d dropped after ratio drop — would show as a skipped parent", i)
+		}
+	}
+
+	dropped := "cross-ns-trace-drop-me"
+	atomic.StoreUint32(&sampler.currentRatio, 1)
+	first := sampler.ShouldSample(dropped, false)
+	atomic.StoreUint32(&sampler.currentRatio, 10000)
+	for i := 0; i < 20; i++ {
+		got := sampler.ShouldSample(dropped, false)
+		if got != first {
+			t.Fatalf("drop/keep flipped after ratio rose (first=%v later=%v)", first, got)
+		}
+	}
+}
+
+func TestAdaptiveSampler_ErrorOverridesDropPin(t *testing.T) {
+	sampler := NewAdaptiveSampler(100, time.Hour)
+	defer sampler.Stop()
+	atomic.StoreUint32(&sampler.currentRatio, 1)
+	id := "error-promotes-trace"
+	_ = sampler.ShouldSample(id, false)
+	if !sampler.ShouldSample(id, true) {
+		t.Fatal("error span must keep the trace")
+	}
+	atomic.StoreUint32(&sampler.currentRatio, 1)
+	if !sampler.ShouldSample(id, false) {
+		t.Fatal("spans after an error must stay kept")
+	}
+}
+
 func TestAdaptiveSampler_Adjuster(t *testing.T) {
 	// Initialize sampler targeting 50 spans per second, with 50ms window size
 	sampler := NewAdaptiveSampler(50, 50*time.Millisecond)

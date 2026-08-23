@@ -109,115 +109,12 @@ func ListClusterNamespaces(ctx context.Context, host, credentials string) ([]str
 func ListWorkloadsInNamespace(ctx context.Context, client kubernetes.Interface, namespace string) ([]WorkloadInfo, error) {
 	var workloads []WorkloadInfo
 
-	// Fetch Ingresses to identify frontend services
-	frontendServices := make(map[string]bool)
-	ingresses, err := client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
-	if err == nil {
-		for _, ing := range ingresses.Items {
-			if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
-				frontendServices[ing.Spec.DefaultBackend.Service.Name] = true
-			}
-			for _, rule := range ing.Spec.Rules {
-				if rule.HTTP == nil {
-					continue
-				}
-
-				for _, path := range rule.HTTP.Paths {
-					if path.Path == "/" || path.Path == "" || path.Path == "/*" {
-						if path.Backend.Service != nil {
-							frontendServices[path.Backend.Service.Name] = true
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Fetch Services to map workload label selectors to frontend services
-	services, err := client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
-	var svcList []corev1.Service
-	if err == nil {
-		svcList = services.Items
-	}
-
-	// Helper to check if a workload is a static frontend
-	isWorkloadFrontend := func(workloadName string, template corev1.PodTemplateSpec) bool {
-		// 1. If it has OTel auto-instrumentation annotations, it is definitely a backend microservice
-		if template.Annotations != nil {
-			for k, v := range template.Annotations {
-				if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") && v != "" {
-					return false
-				}
-			}
-		}
-
-		// 2. Check for backend runtimes or environment configurations
-		isBackend := false
-		for _, c := range template.Spec.Containers {
-			img := strings.ToLower(c.Image)
-			if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "tomcat") ||
-				strings.Contains(img, "python") || strings.Contains(img, "django") || strings.Contains(img, "flask") ||
-				strings.Contains(img, "php") || strings.Contains(img, "fpm") || strings.Contains(img, "laravel") ||
-				strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") ||
-				strings.Contains(img, "golang") || strings.Contains(img, "node:") || strings.Contains(img, "node-") {
-				isBackend = true
-				break
-			}
-			for _, env := range c.Env {
-				envName := strings.ToUpper(env.Name)
-				if strings.Contains(envName, "DB_") || strings.Contains(envName, "DATABASE") ||
-					strings.Contains(envName, "REDIS") || strings.Contains(envName, "KAFKA") ||
-					strings.Contains(envName, "POSTGRES") || strings.Contains(envName, "MONGO") ||
-					strings.Contains(envName, "RABBITMQ") || strings.Contains(envName, "SPRING_") {
-					isBackend = true
-					break
-				}
-			}
-			if isBackend {
-				break
-			}
-		}
-		if isBackend {
-			return false
-		}
-
-		// 3. Check if any container runs a static file web server (nginx, caddy, httpd, apache)
-		for _, c := range template.Spec.Containers {
-			img := strings.ToLower(c.Image)
-			if strings.Contains(img, "nginx") || strings.Contains(img, "caddy") || strings.Contains(img, "httpd") || strings.Contains(img, "apache") {
-				return true
-			}
-		}
-
-		// 4. Check if the workload matches any service that is exposed at the root "/" in Ingresses
-		for _, svc := range svcList {
-			if !frontendServices[svc.Name] {
-				continue
-			}
-			if len(svc.Spec.Selector) > 0 {
-				matches := true
-				for k, v := range svc.Spec.Selector {
-					if template.Labels[k] != v {
-						matches = false
-						break
-					}
-				}
-				if matches {
-					return true
-				}
-			}
-		}
-
-		return false
-	}
-
 	deployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list deployments: %w", err)
 	}
 	for _, d := range deployments.Items {
-		isFrontend := isWorkloadFrontend(d.Name, d.Spec.Template)
-		workloads = append(workloads, workloadFromTemplate(d.Name, namespace, "Deployment", d.Spec.Replicas, d.Status.ReadyReplicas, d.Spec.Template, isFrontend))
+		workloads = append(workloads, workloadFromTemplate(d.Name, namespace, "Deployment", d.Spec.Replicas, d.Status.ReadyReplicas, d.Spec.Template))
 	}
 
 	statefulSets, err := client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
@@ -226,8 +123,7 @@ func ListWorkloadsInNamespace(ctx context.Context, client kubernetes.Interface, 
 	}
 	for _, s := range statefulSets.Items {
 		replicas := s.Spec.Replicas
-		isFrontend := isWorkloadFrontend(s.Name, s.Spec.Template)
-		workloads = append(workloads, workloadFromTemplate(s.Name, namespace, "StatefulSet", replicas, s.Status.ReadyReplicas, s.Spec.Template, isFrontend))
+		workloads = append(workloads, workloadFromTemplate(s.Name, namespace, "StatefulSet", replicas, s.Status.ReadyReplicas, s.Spec.Template))
 	}
 
 	daemonSets, err := client.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
@@ -236,23 +132,45 @@ func ListWorkloadsInNamespace(ctx context.Context, client kubernetes.Interface, 
 	}
 	for _, d := range daemonSets.Items {
 		var replicas int32 = d.Status.DesiredNumberScheduled
-		isFrontend := isWorkloadFrontend(d.Name, d.Spec.Template)
-		workloads = append(workloads, workloadFromTemplate(d.Name, namespace, "DaemonSet", &replicas, d.Status.NumberReady, d.Spec.Template, isFrontend))
+		workloads = append(workloads, workloadFromTemplate(d.Name, namespace, "DaemonSet", &replicas, d.Status.NumberReady, d.Spec.Template))
 	}
 
 	return workloads, nil
 }
 
-func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready int32, template corev1.PodTemplateSpec, isFrontend bool) WorkloadInfo {
+func containerImagesAndCommands(containers []corev1.Container) (images, commands []string) {
+	for _, c := range containers {
+		images = append(images, c.Image)
+		commands = append(commands, c.Command...)
+		commands = append(commands, c.Args...)
+	}
+	return images, commands
+}
+
+func resolveLanguage(requested string, containers []corev1.Container) string {
+	req := strings.ToLower(strings.TrimSpace(requested))
+	if req == "unknown" || req == "auto" {
+		req = ""
+	}
+	images, commands := containerImagesAndCommands(containers)
+	return resolveInject(req, images, commands)
+}
+
+func isStaticHTTPStack(lang string) bool {
+	switch strings.ToLower(strings.TrimSpace(lang)) {
+	case "nginx", "apache-httpd", "apache", "httpd":
+		return true
+	}
+	return false
+}
+
+func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready int32, template corev1.PodTemplateSpec) WorkloadInfo {
 	labels := make(map[string]string)
 	for k, v := range template.Labels {
 		labels[k] = v
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: template.Annotations}, Spec: template.Spec}
-	lang := detectLanguage(pod)
-	if isFrontend {
-		lang = ""
-	}
+	lang := resolveLanguage("", template.Spec.Containers)
 	instr, _, details := detectInstrumentation(pod)
 	return WorkloadInfo{
 		Name:         name,
@@ -264,7 +182,7 @@ func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready i
 		Instrumented: instr,
 		Labels:       labels,
 		Details:      details,
-		IsFrontend:   isFrontend,
+		IsFrontend:   isStaticHTTPStack(lang),
 	}
 }
 
@@ -300,50 +218,10 @@ func ApplyWorkloadInstrumentation(ctx context.Context, client kubernetes.Interfa
 }
 
 func detectLanguageFromPodTemplate(template *corev1.PodTemplateSpec) string {
-	for _, c := range template.Spec.Containers {
-		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "jre") || strings.Contains(img, "tomcat") || strings.Contains(img, "spring") {
-			return "java"
-		}
-		if strings.Contains(img, "node") || strings.Contains(img, "npm") {
-			return "nodejs"
-		}
-		if strings.Contains(img, "python") || strings.Contains(img, "pip") {
-			return "python"
-		}
-		if strings.Contains(img, "go") || strings.Contains(img, "golang") {
-			return "go"
-		}
-		if strings.Contains(img, "dotnet") || strings.Contains(img, "aspnet") {
-			return "dotnet"
-		}
-		if strings.Contains(img, "php") {
-			return "php"
-		}
-
-		for _, env := range c.Env {
-			name := strings.ToUpper(env.Name)
-			if strings.Contains(name, "JAVA") {
-				return "java"
-			}
-			if strings.Contains(name, "NODE") {
-				return "nodejs"
-			}
-			if strings.Contains(name, "PYTHON") {
-				return "python"
-			}
-			if strings.Contains(name, "GOPATH") || strings.Contains(name, "GOROOT") {
-				return "go"
-			}
-			if strings.Contains(name, "DOTNET") {
-				return "dotnet"
-			}
-			if strings.Contains(name, "PHP") {
-				return "php"
-			}
-		}
+	if template == nil {
+		return ""
 	}
-	return ""
+	return resolveLanguage("", template.Spec.Containers)
 }
 
 func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
@@ -351,12 +229,9 @@ func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace
 	if err != nil {
 		return "", err
 	}
-	resolvedLang := language
-	if resolvedLang == "" || resolvedLang == "unknown" || resolvedLang == "auto" {
-		resolvedLang = detectLanguageFromPodTemplate(&deploy.Spec.Template)
-	}
+	resolvedLang := resolveLanguage(language, deploy.Spec.Template.Spec.Containers)
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
-		return "", fmt.Errorf("cannot auto-instrument Deployment %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP) first", namespace, name)
+		return "", fmt.Errorf("cannot auto-instrument Deployment %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
 	patchPodTemplate(&deploy.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
 	_, err = client.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
@@ -368,12 +243,9 @@ func patchStatefulSet(ctx context.Context, client kubernetes.Interface, namespac
 	if err != nil {
 		return "", err
 	}
-	resolvedLang := language
-	if resolvedLang == "" || resolvedLang == "unknown" || resolvedLang == "auto" {
-		resolvedLang = detectLanguageFromPodTemplate(&sts.Spec.Template)
-	}
+	resolvedLang := resolveLanguage(language, sts.Spec.Template.Spec.Containers)
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
-		return "", fmt.Errorf("cannot auto-instrument StatefulSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP) first", namespace, name)
+		return "", fmt.Errorf("cannot auto-instrument StatefulSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
 	patchPodTemplate(&sts.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
 	_, err = client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
@@ -385,12 +257,9 @@ func patchDaemonSet(ctx context.Context, client kubernetes.Interface, namespace,
 	if err != nil {
 		return "", err
 	}
-	resolvedLang := language
-	if resolvedLang == "" || resolvedLang == "unknown" || resolvedLang == "auto" {
-		resolvedLang = detectLanguageFromPodTemplate(&ds.Spec.Template)
-	}
+	resolvedLang := resolveLanguage(language, ds.Spec.Template.Spec.Containers)
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
-		return "", fmt.Errorf("cannot auto-instrument DaemonSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP) first", namespace, name)
+		return "", fmt.Errorf("cannot auto-instrument DaemonSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
 	patchPodTemplate(&ds.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
 	_, err = client.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
