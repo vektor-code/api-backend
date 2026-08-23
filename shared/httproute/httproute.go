@@ -43,6 +43,7 @@ var knownMethods = map[string]bool{
 // url.path and http.method hold resolved values. An empty return means the
 // caller should keep the original span name.
 func TransactionName(tags map[string]string, spanName string) string {
+	spanName = sanitizeSpanName(spanName)
 	if tags == nil {
 		return spanName
 	}
@@ -50,10 +51,9 @@ func TransactionName(tags map[string]string, spanName string) string {
 	method := strings.ToUpper(strings.TrimSpace(tags["http.method"]))
 	route := strings.TrimSpace(tags["http.route"])
 
-	// A span name that is more than a bare method already carries routing
-	// information; the instrumentation knows better than we do.
-	if !isBareMethod(spanName) && spanName != "" {
-		// Unless it embeds raw ids, in which case normalize just those.
+	// Keep a name that already carries a route, unless it is a leaked header
+	// value, MIME type, or other non-operation token.
+	if !isBareMethod(spanName) && spanName != "" && !isGarbageSpanName(spanName) {
 		if looksLikePath(spanName) {
 			return normalizeNameWithPath(spanName)
 		}
@@ -234,6 +234,52 @@ func normalizeNameWithPath(spanName string) string {
 		return spanName
 	}
 	return prefix + NormalizePath(path)
+}
+
+
+func sanitizeSpanName(name string) string {
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if r < 32 || r == 127 {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+var garbageSpanNames = map[string]bool{
+	"nosniff": true, "no-sniff": true, "no-store": true, "no-cache": true,
+	"must-revalidate": true, "private": true, "public": true,
+	"same-origin": true, "same-site": true, "cross-origin": true,
+	"keep-alive": true, "chunked": true, "gzip": true, "deflate": true,
+	"gzip, br": true, "gzip, deflate": true, "gzip, deflate, br": true,
+	"cors": true,
+}
+
+var mimeTypes = map[string]bool{
+	"application": true, "audio": true, "font": true, "image": true,
+	"message": true, "model": true, "multipart": true, "text": true, "video": true,
+}
+
+func isGarbageSpanName(name string) bool {
+	cleaned := sanitizeSpanName(name)
+	if cleaned == "" {
+		return true
+	}
+	if garbageSpanNames[strings.ToLower(cleaned)] {
+		return true
+	}
+	slash := strings.Index(cleaned, "/")
+	if slash > 0 && !strings.HasPrefix(cleaned, "/") && !strings.Contains(cleaned, " ") {
+		return mimeTypes[strings.ToLower(cleaned[:slash])]
+	}
+	return false
 }
 
 // isBareMethod reports whether a span name is nothing but an HTTP method.

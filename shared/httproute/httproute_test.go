@@ -150,3 +150,26 @@ func TestIsBareMethod(t *testing.T) {
 		}
 	}
 }
+
+func TestGarbageSpanNameRecoversRoute(t *testing.T) {
+	tags := map[string]string{
+		"http.method": "GET",
+		"url.path":    "/actuator/health",
+	}
+	if got := TransactionName(tags, "nosniff"); got != "GET /actuator/health" {
+		t.Errorf("nosniff = %q, want recovered route", got)
+	}
+	if got := TransactionName(tags, "text/html"); got != "GET /actuator/health" {
+		t.Errorf("text/html = %q, want recovered route", got)
+	}
+}
+
+func TestControlCharactersCollapseToBareMethod(t *testing.T) {
+	tags := map[string]string{
+		"http.method": "POST",
+		"url.path":    "/g/collect",
+	}
+	if got := TransactionName(tags, "POST\x08"); got != "POST /g/collect" {
+		t.Errorf("control-char name = %q, want recovered route", got)
+	}
+}
