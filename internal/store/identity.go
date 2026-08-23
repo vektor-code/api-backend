@@ -29,19 +29,28 @@ func transactionIdentitySpan(trace *models.Trace) *models.Span {
 	if trace == nil {
 		return nil
 	}
+	var incoming *models.Span
+	considerIncoming := func(sp *models.Span) {
+		if sp == nil || !isRequestSpan(sp) {
+			return
+		}
+		if incoming == nil || sp.StartTime.Before(incoming.StartTime) {
+			incoming = sp
+		}
+	}
+	considerIncoming(trace.RootSpan)
+	for _, sp := range trace.Spans {
+		considerIncoming(sp)
+	}
+	if incoming != nil {
+		return incoming
+	}
+	// Cron/custom INTERNAL may name a transaction only when it is the root.
+	// Child repository methods must not steal identity from a missing SERVER.
 	if isTransactionSpan(trace.RootSpan) {
 		return trace.RootSpan
 	}
-	var best *models.Span
-	for _, sp := range trace.Spans {
-		if !isTransactionSpan(sp) {
-			continue
-		}
-		if best == nil || sp.StartTime.Before(best.StartTime) {
-			best = sp
-		}
-	}
-	return best
+	return nil
 }
 
 func isPoolHousekeeper(tags map[string]string) bool {

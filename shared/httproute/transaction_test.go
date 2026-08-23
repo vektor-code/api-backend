@@ -39,6 +39,12 @@ func TestTransactionIdentityEligible(t *testing.T) {
 	if TransactionIdentityEligible("INTERNAL", hikari) {
 		t.Fatal("Hikari INTERNAL must not be a transaction")
 	}
+	if TransactionIdentityEligible("INTERNAL", map[string]string{"db.statement": "SELECT 1"}) {
+		t.Fatal("ORM INTERNAL with a statement must not be a transaction")
+	}
+	if TransactionIdentityEligible("INTERNAL", map[string]string{"db.operation": "SELECT"}) {
+		t.Fatal("ORM INTERNAL with db.operation must not be a transaction")
+	}
 	if !TransactionIdentityEligible("INTERNAL", map[string]string{}) {
 		t.Fatal("non-datastore INTERNAL must be a transaction")
 	}
@@ -73,6 +79,9 @@ func TestCHTransactionIdentityEligibleMirrorsGo(t *testing.T) {
 	}
 	if !strings.Contains(sql, "database") {
 		t.Fatalf("missing datastore exclusion:\n%s", sql)
+	}
+	if !strings.Contains(sql, "db.statement") {
+		t.Fatalf("missing ORM statement exclusion:\n%s", sql)
 	}
 	if strings.Contains(sql, "upperUTF8(kind) != 'SERVER'") && !strings.Contains(sql, "upperUTF8(kind) = 'SERVER'") {
 		t.Fatalf("CLIENT must not pass solely because it is not SERVER:\n%s", sql)

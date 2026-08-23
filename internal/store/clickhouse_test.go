@@ -36,6 +36,10 @@ func TestChEndpointRootPredicateGatesMalformedHTTPServer(t *testing.T) {
 	if !strings.Contains(pred, "http.request.method") {
 		t.Fatalf("missing method key: %s", pred)
 	}
+	expr := chAnyIfTransactionExpr("service_name")
+	if !strings.Contains(expr, "countIf") || !strings.Contains(expr, "argMinIf") {
+		t.Fatalf("transaction identity should prefer the earliest incoming SERVER/CONSUMER span over the trace root:\n%s", expr)
+	}
 	// Duration still uses the ungated root predicate.
 	if strings.Contains(chRootSpanPredicate, "http.request.method") {
 		t.Fatal("chRootSpanPredicate must stay duration-unrelated")

@@ -196,8 +196,21 @@ func chEndpointRootPredicate() string {
 	return "((" + chRootSpanPredicate + ") AND " + httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind") + ")"
 }
 
+func chIncomingSpanPredicate() string {
+	return httproute.CHRequestIdentityEligible("kind", "tags")
+}
+
+// chAnyIfTransactionExpr picks the earliest incoming SERVER/CONSUMER span
+// anywhere in the trace (Datadog/Elastic behavior). If the trace has none, it
+// falls back to an eligible INTERNAL root such as a cron job.
+func chAnyIfTransactionExpr(valueExpr string) string {
+	incoming := chIncomingSpanPredicate()
+	fallback := chEndpointRootPredicate()
+	return fmt.Sprintf("if(countIf(%s) > 0, argMinIf(%s, timestamp, %s), argMinIf(%s, timestamp, %s))", incoming, valueExpr, incoming, valueExpr, fallback)
+}
+
 func chRootTransactionNameExpr() string {
-	return fmt.Sprintf("anyIf(if(transaction_name != '', transaction_name, operation_name), %s)", chEndpointRootPredicate())
+	return chAnyIfTransactionExpr("if(transaction_name != '', transaction_name, operation_name)")
 }
 
 func chOperationHaving(operation string) string {
@@ -697,15 +710,15 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 	// name merged every endpoint of a service that names its server spans
 	// after the bare HTTP method into one row.
 	inner := fmt.Sprintf(`SELECT
-		anyIf(service_name, %s) AS root_service,
-		anyIf(namespace, %s) AS root_namespace,
-		anyIf(if(transaction_name != '', transaction_name, operation_name), %s) AS root_op,
+		%s AS root_service,
+		%s AS root_namespace,
+		%s AS root_op,
 		(max(toUnixTimestamp64Milli(timestamp) + intDiv(duration_ns, 1000000)) - min(toUnixTimestamp64Milli(timestamp))) AS dur_ms,
 		countIf(status_code = 'ERROR') > 0 AS has_error,
 		maxIf(sample_weight, %s) AS weight
 	FROM kubetrace.spans
 	WHERE %s
-	GROUP BY trace_id`, chEndpointRootPredicate(), chEndpointRootPredicate(), chEndpointRootPredicate(), chRootSpanPredicate, strings.Join(where, " AND "))
+	GROUP BY trace_id`, chAnyIfTransactionExpr("service_name"), chAnyIfTransactionExpr("namespace"), chAnyIfTransactionExpr("if(transaction_name != '', transaction_name, operation_name)"), chRootSpanPredicate, strings.Join(where, " AND "))
 	if len(having) > 0 {
 		inner += "\n\tHAVING " + strings.Join(having, " AND ")
 	}

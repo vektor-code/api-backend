@@ -281,15 +281,22 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 }
 
 func traceMatchesOperation(trace *models.Trace, operation string) bool {
-	if trace == nil || trace.RootSpan == nil {
+	if trace == nil {
 		return false
 	}
 	target := strings.ToLower(strings.TrimSpace(operation))
 	if target == "" {
 		return true
 	}
-	rootName := strings.ToLower(trace.RootSpan.Name)
-	transactionName := strings.ToLower(httproute.TransactionName(trace.RootSpan.Attributes, trace.RootSpan.Name))
+	ident := transactionIdentitySpan(trace)
+	if ident == nil {
+		ident = trace.RootSpan
+	}
+	if ident == nil {
+		return false
+	}
+	rootName := strings.ToLower(ident.Name)
+	transactionName := strings.ToLower(httproute.TransactionName(ident.Attributes, ident.Name))
 	return strings.Contains(rootName, target) || strings.Contains(transactionName, target)
 }
 

@@ -52,6 +52,57 @@ func TestTransactionIdentityPrefersHTTPServerOverClientRoot(t *testing.T) {
 	}
 }
 
+func TestTransactionIdentityIgnoresORMInternalRoot(t *testing.T) {
+	orm := &models.Span{
+		Name:      "UserRepository.findByEmail",
+		Kind:      models.SpanKindInternal,
+		StartTime: time.Now(),
+		Attributes: map[string]string{
+			"db.statement": "SELECT * FROM users WHERE email = ?",
+		},
+	}
+	trace := &models.Trace{RootSpan: orm, Spans: []*models.Span{orm}}
+	if traceHasTransactionIdentity(trace) {
+		t.Fatal("ORM INTERNAL root must not be a transaction")
+	}
+}
+
+func TestTransactionIdentityPrefersHTTPServerOverInternalRoot(t *testing.T) {
+	now := time.Now()
+	cron := &models.Span{
+		Name:      "billing.nightly",
+		Kind:      models.SpanKindInternal,
+		StartTime: now,
+	}
+	server := &models.Span{
+		Name:      "GET /api/users",
+		Kind:      models.SpanKindServer,
+		StartTime: now.Add(time.Millisecond),
+		Attributes: map[string]string{
+			"http.request.method": "GET",
+			"http.route":          "/api/users",
+		},
+	}
+	trace := &models.Trace{RootSpan: cron, Spans: []*models.Span{cron, server}}
+	got := transactionIdentitySpan(trace)
+	if got == nil || got.Name != "GET /api/users" {
+		t.Fatalf("expected HTTP SERVER identity over INTERNAL root, got %#v", got)
+	}
+}
+
+func TestTransactionIdentityKeepsNonDatastoreInternalRoot(t *testing.T) {
+	cron := &models.Span{
+		Name:      "billing.nightly",
+		Kind:      models.SpanKindInternal,
+		StartTime: time.Now(),
+	}
+	trace := &models.Trace{RootSpan: cron, Spans: []*models.Span{cron}}
+	got := transactionIdentitySpan(trace)
+	if got == nil || got.Name != "billing.nightly" {
+		t.Fatalf("expected INTERNAL cron identity, got %#v", got)
+	}
+}
+
 func TestIsRequestSpan(t *testing.T) {
 	if isRequestSpan(&models.Span{Kind: models.SpanKindClient, Attributes: map[string]string{"db.system": "postgresql"}}) {
 		t.Fatal("CLIENT must not count as a request")
