@@ -309,12 +309,21 @@ func isFrontendPod(p *corev1.Pod) bool {
 }
 
 func detectLanguage(p *corev1.Pod) string {
+	for _, c := range p.Spec.Containers {
+		img := strings.ToLower(c.Image)
+		if strings.Contains(img, "nginx") || strings.Contains(img, "openresty") {
+			return "nginx"
+		}
+		if strings.Contains(img, "httpd") || strings.Contains(img, "apache2") {
+			return "apache-httpd"
+		}
+	}
 	if isFrontendPod(p) {
 		return ""
 	}
 	for _, c := range p.Spec.Containers {
 		img := strings.ToLower(c.Image)
-		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "jre") || strings.Contains(img, "tomcat") || strings.Contains(img, "spring") {
+		if strings.Contains(img, "java") || strings.Contains(img, "openjdk") || strings.Contains(img, "jre") || strings.Contains(img, "tomcat") || strings.Contains(img, "spring") || strings.Contains(img, "temurin") || strings.Contains(img, "corretto") || strings.Contains(img, "graalvm") || strings.Contains(img, "distroless/java") {
 			return "java"
 		}
 		if strings.Contains(img, "node") || strings.Contains(img, "npm") {

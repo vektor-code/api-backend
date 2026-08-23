@@ -21,7 +21,14 @@ type Span struct {
 	Kind         SpanKind          `json:"kind"`
 	Attributes   map[string]string `json:"attributes,omitempty"`
 	Events       []SpanEvent       `json:"events,omitempty"`
+	Links        []SpanLink        `json:"links,omitempty"`
 	Error        string            `json:"error,omitempty"`
+}
+
+type SpanLink struct {
+	TraceID    string            `json:"traceId,omitempty"`
+	SpanID     string            `json:"spanId,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
 type SpanStatus string

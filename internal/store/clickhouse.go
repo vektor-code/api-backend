@@ -316,6 +316,12 @@ func chRowToSpan(row map[string]any) *models.Span {
 			span.Events = events
 		}
 	}
+	if raw := span.Attributes["otel.span.links"]; raw != "" {
+		var links []models.SpanLink
+		if err := json.Unmarshal([]byte(raw), &links); err == nil {
+			span.Links = links
+		}
+	}
 
 	if span.Namespace == "" {
 		span.Namespace = span.Attributes["k8s.namespace.name"]
@@ -337,7 +343,7 @@ func (s *Store) runClickHouseRefresh() {
 	_ = s.LoadDisabledNamespaces()
 	_ = s.LoadConfiguredNamespaces()
 
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.refreshFromClickHouse()

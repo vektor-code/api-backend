@@ -150,7 +150,8 @@ func LicenseMiddleware(h *Handler) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		path := c.Path()
 		switch path {
-		case "/health", "/ready", "/api/health", "/api/auth/login", "/api/auth/lookup", "/api/auth/refresh", "/api/auth/me", "/api/license":
+		case "/health", "/ready", "/api/health", "/api/auth/login", "/api/auth/lookup", "/api/auth/refresh", "/api/auth/me", "/api/license",
+			"/v1/traces", "/api/ingest", "/v1/namespaces/config", "/v1/investigations/jobs", "/v1/investigations/results":
 			return c.Next()
 		}
 		if h.licenseAllowed() {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -190,7 +191,20 @@ func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.S
 		errMsg = pb.Status.Message
 	}
 
-	return &models.Span{
+	var links []models.SpanLink
+	for _, ln := range pb.Links {
+		linkAttrs := make(map[string]string, len(ln.Attributes))
+		for _, a := range ln.Attributes {
+			linkAttrs[a.Key] = stringVal(a.Value)
+		}
+		links = append(links, models.SpanLink{
+			TraceID:    fmt.Sprintf("%x", ln.TraceId),
+			SpanID:     fmt.Sprintf("%x", ln.SpanId),
+			Attributes: linkAttrs,
+		})
+	}
+
+	span := &models.Span{
 		TraceID:      fmt.Sprintf("%x", pb.TraceId),
 		SpanID:       fmt.Sprintf("%x", pb.SpanId),
 		ParentSpanID: fmt.Sprintf("%x", pb.ParentSpanId),
@@ -207,8 +221,40 @@ func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.S
 		Kind:         kind,
 		Attributes:   attrs,
 		Events:       events,
+		Links:        links,
 		Error:        errMsg,
 	}
+	if status != models.SpanStatusError && spanLooksErrored(attrs, events) {
+		span.Status = models.SpanStatusError
+	}
+	if len(links) > 0 {
+		if raw, err := json.Marshal(links); err == nil {
+			if span.Attributes == nil {
+				span.Attributes = map[string]string{}
+			}
+			span.Attributes["otel.span.links"] = string(raw)
+		}
+	}
+	return span
+}
+
+func spanLooksErrored(attrs map[string]string, events []models.SpanEvent) bool {
+	for _, key := range []string{"http.response.status_code", "http.status_code", "http.status"} {
+		if code, err := strconv.Atoi(strings.TrimSpace(attrs[key])); err == nil && code >= 500 {
+			return true
+		}
+	}
+	for _, key := range []string{"rpc.grpc.status_code", "grpc.status_code"} {
+		if code, err := strconv.Atoi(strings.TrimSpace(attrs[key])); err == nil && code != 0 {
+			return true
+		}
+	}
+	for _, ev := range events {
+		if strings.EqualFold(ev.Name, "exception") {
+			return true
+		}
+	}
+	return false
 }
 
 func stringVal(v *commonpb.AnyValue) string {

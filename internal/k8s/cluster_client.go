@@ -403,7 +403,7 @@ func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentatio
 	}
 
 	injectLang := normalizeInjectLanguage(language)
-	if enabled && injectLang != "" && injectLang != "php" {
+	if enabled && injectLang != "" {
 		desiredInjectKey := "instrumentation.opentelemetry.io/inject-" + injectLang
 		for k := range template.Annotations {
 			if strings.HasPrefix(k, "instrumentation.opentelemetry.io/inject-") && k != desiredInjectKey {
@@ -426,9 +426,14 @@ func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentatio
 		}
 	}
 
+	httpEndpoint := strings.Replace(endpoint, ":4317", ":4318", 1)
+	if !strings.Contains(httpEndpoint, "://") {
+		httpEndpoint = "http://" + httpEndpoint
+	}
+	origLang := strings.ToLower(strings.TrimSpace(language))
 	for i := range template.Spec.Containers {
-		if enabled && injectLang == "php" {
-			setPHPEnvVars(&template.Spec.Containers[i], endpoint, namespace, clusterID)
+		if enabled && (injectLang == "sdk" || origLang == "php" || origLang == "ruby" || origLang == "rails") {
+			setLibraryEnvVars(&template.Spec.Containers[i], httpEndpoint, namespace, clusterID, origLang)
 		} else {
 			removeOTelEnvVars(&template.Spec.Containers[i])
 		}
@@ -436,29 +441,47 @@ func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentatio
 }
 
 func normalizeInjectLanguage(language string) string {
-	switch strings.ToLower(language) {
-	case "java", "nodejs", "node", "python", "go", "dotnet", "php":
-		if language == "node" {
-			return "nodejs"
-		}
-		return strings.ToLower(language)
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "java", "nodejs", "python", "go", "dotnet", "nginx":
+		return strings.ToLower(strings.TrimSpace(language))
+	case "node":
+		return "nodejs"
+	case "php", "ruby", "rails":
+		return "sdk"
+	case "apache", "httpd", "apache-httpd", "apachehttpd":
+		return "apache-httpd"
 	default:
 		return ""
 	}
 }
 
 func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
-	if len(template.Spec.Containers) == 0 {
+	if template == nil || len(template.Spec.Containers) == 0 {
 		return "/app"
 	}
 	c := template.Spec.Containers[0]
-	if len(c.Command) > 0 && strings.HasPrefix(c.Command[0], "/") {
-		return c.Command[0]
+	parts := append(append([]string{}, c.Command...), c.Args...)
+	wrappers := map[string]bool{"sh": true, "bash": true, "ash": true, "/bin/sh": true, "/bin/bash": true, "entrypoint.sh": true, "docker-entrypoint.sh": true, "dumb-init": true, "tini": true, "env": true, "/usr/bin/env": true}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.HasPrefix(part, "-") {
+			continue
+		}
+		base := part
+		if i := strings.LastIndex(part, "/"); i >= 0 {
+			base = part[i+1:]
+		}
+		if wrappers[part] || wrappers[base] {
+			continue
+		}
+		if strings.HasPrefix(part, "/") {
+			return part
+		}
+		if strings.HasPrefix(part, "./") {
+			return "/" + strings.TrimPrefix(part, "./")
+		}
 	}
-	if len(c.Args) > 0 && strings.HasPrefix(c.Args[0], "/") {
-		return c.Args[0]
-	}
-	if name := executableName(c.Name); name != "" {
+	if name := executableName(c.Name); name != "" && !genericProcessName(name) {
 		return "/" + name
 	}
 	imageName := c.Image
@@ -471,10 +494,18 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 	if at := strings.LastIndex(imageName, "@"); at >= 0 {
 		imageName = imageName[:at]
 	}
-	if name := executableName(imageName); name != "" {
+	if name := executableName(imageName); name != "" && !genericProcessName(name) {
 		return "/" + name
 	}
 	return "/app"
+}
+
+func genericProcessName(name string) bool {
+	switch strings.ToLower(name) {
+	case "app", "server", "web", "main", "container", "workload", "service":
+		return true
+	}
+	return false
 }
 
 func executableName(value string) string {
@@ -489,15 +520,18 @@ func executableName(value string) string {
 	return value
 }
 
-func setPHPEnvVars(container *corev1.Container, endpoint, namespace, clusterID string) {
+func setLibraryEnvVars(container *corev1.Container, endpoint, namespace, clusterID, lang string) {
 	envMap := map[string]string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
-		"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
 		"OTEL_TRACES_EXPORTER":        "otlp",
-		"OTEL_PHP_AUTOLOAD_ENABLED":   "true",
+		"OTEL_METRICS_EXPORTER":       "none",
 		"OTEL_LOGS_EXPORTER":          "none",
 		"OTEL_SERVICE_NAME":           container.Name,
 		"OTEL_RESOURCE_ATTRIBUTES":    fmt.Sprintf("k8s.namespace.name=%s,service.namespace=%s,k8s.cluster.name=%s", namespace, namespace, clusterID),
+	}
+	if lang == "php" {
+		envMap["OTEL_PHP_AUTOLOAD_ENABLED"] = "true"
 	}
 	existing := make(map[string]int)
 	for i, env := range container.Env {

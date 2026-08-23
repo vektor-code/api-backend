@@ -19,6 +19,18 @@ func TestBuildInstrumentationObjectAddsPythonEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildInstrumentationObjectUsesFastExport(t *testing.T) {
+	inst := BuildInstrumentationObject("troni-dev", "crnet-apm")
+	spec := inst["spec"].(map[string]interface{})
+	if got := envValue(spec["env"].([]interface{}), "OTEL_BSP_SCHEDULE_DELAY"); got != "500" {
+		t.Fatalf("OTEL_BSP_SCHEDULE_DELAY = %q, want 500", got)
+	}
+	goSpec := spec["go"].(map[string]interface{})
+	if got := envValue(goSpec["env"].([]interface{}), "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
+		t.Fatalf("go protocol = %q, want http/protobuf", got)
+	}
+}
+
 func envValue(env []interface{}, name string) string {
 	for _, item := range env {
 		kv, ok := item.(map[string]interface{})

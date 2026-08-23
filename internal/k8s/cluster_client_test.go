@@ -50,3 +50,33 @@ func TestPatchPodTemplateSetsGoTargetAndCleansStaleAnnotations(t *testing.T) {
 		t.Fatalf("go target exe = %q, want /reverse-proxy", got)
 	}
 }
+
+func TestPatchPodTemplatePHPUsesSDKAndAutoload(t *testing.T) {
+	template := &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "www",
+				Image: "php:8.3-fpm",
+			}},
+		},
+	}
+	patchPodTemplate(template, "php", "ns-instrumentation", "http://agent:4317", "billing", "cluster-a", true)
+	if got := template.Annotations["instrumentation.opentelemetry.io/inject-sdk"]; got != "ns-instrumentation" {
+		t.Fatalf("inject-sdk = %q", got)
+	}
+	if _, ok := template.Annotations["instrumentation.opentelemetry.io/inject-php"]; ok {
+		t.Fatal("operator has no inject-php; should not set it")
+	}
+	found := false
+	for _, env := range template.Spec.Containers[0].Env {
+		if env.Name == "OTEL_PHP_AUTOLOAD_ENABLED" && env.Value == "true" {
+			found = true
+		}
+		if env.Name == "OTEL_EXPORTER_OTLP_PROTOCOL" && env.Value != "http/protobuf" {
+			t.Fatalf("php protocol = %q", env.Value)
+		}
+	}
+	if !found {
+		t.Fatal("missing OTEL_PHP_AUTOLOAD_ENABLED")
+	}
+}

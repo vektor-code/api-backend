@@ -38,6 +38,12 @@ func Build(spans []*models.Span) Forest {
 	parentOf := make(map[string]string, len(ordered))
 	for _, sp := range ordered {
 		if IsRoot(sp.ParentSpanID) {
+			if linked := linkedParentInTrace(sp, f.ByID); linked != nil && linked.SpanID != sp.SpanID {
+				parentKey := Normalize(linked.SpanID)
+				f.Children[parentKey] = append(f.Children[parentKey], sp)
+				parentOf[Normalize(sp.SpanID)] = parentKey
+				continue
+			}
 			trueRoots = append(trueRoots, sp)
 			continue
 		}
@@ -69,7 +75,10 @@ func Build(spans []*models.Span) Forest {
 		if f.DisplayRoot != nil && sp.SpanID == f.DisplayRoot.SpanID {
 			continue
 		}
-		host := tightestContainer(ordered, sp)
+		host := linkedParentInTrace(sp, f.ByID)
+		if host == nil {
+			host = tightestContainer(ordered, sp)
+		}
 		if host == nil || createsCycle(parentOf, Normalize(sp.SpanID), Normalize(host.SpanID)) {
 			host = f.DisplayRoot
 		}
@@ -161,4 +170,22 @@ func contains(parent, child *models.Span) bool {
 		return false
 	}
 	return true
+}
+
+func linkedParentInTrace(sp *models.Span, byID map[string]*models.Span) *models.Span {
+	if sp == nil || len(sp.Links) == 0 {
+		return nil
+	}
+	for _, link := range sp.Links {
+		if link.SpanID == "" {
+			continue
+		}
+		if link.TraceID != "" && Normalize(link.TraceID) != Normalize(sp.TraceID) {
+			continue
+		}
+		if parent := byID[Normalize(link.SpanID)]; parent != nil && parent.SpanID != sp.SpanID {
+			return parent
+		}
+	}
+	return nil
 }
