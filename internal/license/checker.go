@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strings"
@@ -63,7 +64,7 @@ func New(cfg Config, logger *slog.Logger) *Checker {
 	cfg.Product = product
 	cfg.InstanceID = instanceID
 	if cfg.Interval <= 0 {
-		cfg.Interval = 30 * time.Second
+		cfg.Interval = 24 * time.Hour
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -123,16 +124,34 @@ func (c *Checker) Snapshot() Status {
 func (c *Checker) loop(ctx context.Context) {
 	defer close(c.done)
 	c.refresh(ctx)
-	ticker := time.NewTicker(c.cfg.Interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(c.nextWait())
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			c.refresh(ctx)
+			timer.Reset(c.nextWait())
 		}
 	}
+}
+
+func (c *Checker) nextWait() time.Duration {
+	wait := c.cfg.Interval
+	if wait <= 0 {
+		wait = 24 * time.Hour
+	}
+	// ±10% jitter so replicas do not align on the same tick.
+	span := int64(wait / 5)
+	if span < 1 {
+		return wait
+	}
+	wait += time.Duration(rand.Int64N(span+1)) - wait/10
+	if wait < time.Minute {
+		return time.Minute
+	}
+	return wait
 }
 
 func (c *Checker) refresh(ctx context.Context) {
