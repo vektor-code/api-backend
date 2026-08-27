@@ -1,6 +1,14 @@
 package license
 
-const (
-	EndpointURL    = "https://activation-dev.cloudraft.net"
-	HeartbeatToken = "crnet-activation-heartbeat-v1"
+import (
+	"os"
+	"strings"
 )
+
+func Endpoint() string {
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("ACTIVATION_ENDPOINT")), "/")
+}
+
+func Token() string {
+	return strings.TrimSpace(os.Getenv("ACTIVATION_HEARTBEAT_TOKEN"))
+}

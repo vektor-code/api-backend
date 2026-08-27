@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"time"
 )
+
+var errActivationUnconfigured = errors.New("ACTIVATION_ENDPOINT and ACTIVATION_HEARTBEAT_TOKEN must be set")
 
 const maxBody = 1 << 20
 
@@ -44,6 +47,7 @@ type Checker struct {
 	logger    *slog.Logger
 	client    *http.Client
 	heartbeat string
+	token     string
 
 	mu      sync.RWMutex
 	current Status
@@ -69,11 +73,17 @@ func New(cfg Config, logger *slog.Logger) *Checker {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	ep, token := Endpoint(), Token()
+	heartbeat := ""
+	if ep != "" {
+		heartbeat = ep + "/api/v1/heartbeat"
+	}
 	return &Checker{
 		cfg:       cfg,
 		logger:    logger,
 		client:    &http.Client{Timeout: 8 * time.Second},
-		heartbeat: strings.TrimRight(EndpointURL, "/") + "/api/v1/heartbeat",
+		heartbeat: heartbeat,
+		token:     token,
 		current: Status{
 			Valid:      false,
 			Status:     "pending",
@@ -167,6 +177,9 @@ func (c *Checker) refresh(ctx context.Context) {
 }
 
 func (c *Checker) postHeartbeat(ctx context.Context) (Status, error) {
+	if c.heartbeat == "" || c.token == "" {
+		return Status{}, errActivationUnconfigured
+	}
 	body, err := json.Marshal(map[string]string{
 		"product":       c.cfg.Product,
 		"instance_id":   c.cfg.InstanceID,
@@ -182,7 +195,7 @@ func (c *Checker) postHeartbeat(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+HeartbeatToken)
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	res, err := c.client.Do(req)
 	if err != nil {
 		return Status{}, err
