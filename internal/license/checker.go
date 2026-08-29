@@ -68,7 +68,7 @@ func New(cfg Config, logger *slog.Logger) *Checker {
 	cfg.Product = product
 	cfg.InstanceID = instanceID
 	if cfg.Interval <= 0 {
-		cfg.Interval = 24 * time.Hour
+		cfg.Interval = 15 * time.Second
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -150,7 +150,7 @@ func (c *Checker) loop(ctx context.Context) {
 func (c *Checker) nextWait() time.Duration {
 	wait := c.cfg.Interval
 	if wait <= 0 {
-		wait = 24 * time.Hour
+		wait = 15 * time.Second
 	}
 	// ±10% jitter so replicas do not align on the same tick.
 	span := int64(wait / 5)
@@ -158,8 +158,8 @@ func (c *Checker) nextWait() time.Duration {
 		return wait
 	}
 	wait += time.Duration(rand.Int64N(span+1)) - wait/10
-	if wait < time.Minute {
-		return time.Minute
+	if wait < 5*time.Second {
+		return 5 * time.Second
 	}
 	return wait
 }
