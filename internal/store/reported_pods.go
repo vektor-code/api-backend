@@ -90,7 +90,7 @@ func (s *Store) GetReportedLanguageForService(namespace, serviceName string) str
 	pods := s.reportedPods[namespace]
 	for _, p := range pods {
 		if p.MatchesService(serviceName) {
-			if p.Language != "" {
+			if IsAssignedStack(p.Language) {
 				return p.Language
 			}
 		}

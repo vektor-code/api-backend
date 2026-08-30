@@ -233,22 +233,22 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 			manualOverride = cfg.ManualOverride
 		}
 		lang := w.Language
-		if hasCfg && cfg.Language != "" && !strings.EqualFold(cfg.Language, "unknown") && !strings.EqualFold(cfg.Language, "auto") {
+		if hasCfg && store.IsAssignedStack(cfg.Language) {
 			lang = cfg.Language
 		}
 		applications = append(applications, fiber.Map{
-			"name":              w.Name,
-			"namespace":         w.Namespace,
-			"kind":              w.Kind,
-			"replicas":          w.Replicas,
-			"ready":             w.Ready,
-			"language":          lang,
-			"detectedLanguage":  w.Language,
-			"instrumented":      enabled,
-			"manualOverride":    manualOverride,
-			"details":           w.Details,
-			"labels":            w.Labels,
-			"cluster":           clusterID,
+			"name":             w.Name,
+			"namespace":        w.Namespace,
+			"kind":             w.Kind,
+			"replicas":         w.Replicas,
+			"ready":            w.Ready,
+			"language":         lang,
+			"detectedLanguage": w.Language,
+			"instrumented":     enabled,
+			"manualOverride":   manualOverride,
+			"details":          w.Details,
+			"labels":           w.Labels,
+			"cluster":          clusterID,
 		})
 	}
 
@@ -413,6 +413,5 @@ func (h *Handler) mergeInventoryTokens(incoming []store.ClusterInventoryItem) ([
 }
 
 func isAutoStack(language string) bool {
-	key := strings.ToLower(strings.TrimSpace(language))
-	return key == "" || key == "unknown" || key == "auto"
+	return !store.IsAssignedStack(language)
 }

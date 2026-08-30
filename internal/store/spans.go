@@ -154,7 +154,7 @@ func (s *Store) updateStats(span *models.Span) {
 	if stat.Cluster == "" && span.Cluster != "" {
 		stat.Cluster = span.Cluster
 	}
-	if (stat.Language == "" || stat.Language == "unknown") && span.Attributes != nil {
+	if !IsAssignedStack(stat.Language) && span.Attributes != nil {
 		if lang := DetectLanguageFromSpan(span); lang != "" {
 			stat.Language = lang
 		}
@@ -178,13 +178,17 @@ func DetectLanguageFromSpan(span *models.Span) string {
 	}
 
 	// 1. Standard telemetry SDK language resource attributes
-	if lang, ok := span.Attributes["telemetry.sdk.language"]; ok && lang != "" {
-		return cleanLanguage(lang)
+	if lang, ok := span.Attributes["telemetry.sdk.language"]; ok {
+		if cleaned := cleanLanguage(lang); cleaned != "" {
+			return cleaned
+		}
 	}
 
 	// 2. Process runtime name (e.g. openjdk, go, node)
-	if rt, ok := span.Attributes["process.runtime.name"]; ok && rt != "" {
-		return cleanLanguage(rt)
+	if rt, ok := span.Attributes["process.runtime.name"]; ok {
+		if cleaned := cleanLanguage(rt); cleaned != "" {
+			return cleaned
+		}
 	}
 
 	// 3. OTel Scope / Instrumentation Library Name
@@ -291,6 +295,8 @@ func cleanLanguage(lang string) string {
 		return "php"
 	case strings.Contains(l, "ruby") || strings.Contains(l, "jruby"):
 		return "ruby"
+	case l == "" || l == "unknown" || l == "auto" || l == "unk":
+		return ""
 	default:
 		return l
 	}

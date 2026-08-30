@@ -274,9 +274,11 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 
 		if namespace == "" || parts[0] == namespace {
 			node := *svc
-			if exists && cfg.Language != "" {
-				node.Language = cfg.Language
+			assigned := ""
+			if exists {
+				assigned = cfg.Language
 			}
+			node.Language = ResolveServiceLanguage(svc.Language, assigned, "", "")
 			data.Nodes = append(data.Nodes, node)
 			seenNodes[parts[0]+":"+svc.ServiceName] = true
 		}
@@ -313,9 +315,9 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 		key := p.Namespace + ":" + svcName
 		if !seenNodes[key] {
 			seenNodes[key] = true
-			lang := p.Language
-			if exists && cfg.Language != "" {
-				lang = cfg.Language
+			lang := ResolveServiceLanguage("", "", "", p.Language)
+			if exists {
+				lang = ResolveServiceLanguage("", cfg.Language, "", p.Language)
 			}
 			data.Nodes = append(data.Nodes, models.ServiceStats{
 				ServiceName: svcName,

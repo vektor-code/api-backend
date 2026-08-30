@@ -584,20 +584,27 @@ func (h *Handler) GetServices(c *fiber.Ctx) error {
 
 	cfgMap := h.store.GetApplicationConfigMap()
 	for i := range services {
-		key := services[i].Namespace + ":" + services[i].ServiceName
-		if cfg, ok := cfgMap[key]; ok && cfg.Language != "" {
-			services[i].Language = cfg.Language
-		} else {
-			if services[i].Language == "" && h.k8s != nil {
-				services[i].Language = h.k8s.GetLanguageForService(services[i].Namespace, services[i].ServiceName)
-			}
-			if services[i].Language == "" {
-				services[i].Language = h.store.GetReportedLanguageForService(services[i].Namespace, services[i].ServiceName)
-			}
-		}
+		services[i].Language = h.resolveListedLanguage(services[i].Namespace, services[i].ServiceName, services[i].Language, cfgMap)
 	}
 
 	return c.JSON(fiber.Map{"services": services})
+}
+
+func (h *Handler) resolveListedLanguage(ns, name, fromSpans string, cfgMap map[string]store.WorkloadInstrumentation) string {
+	assigned := ""
+	if cfg, ok := cfgMap[ns+":"+name]; ok {
+		assigned = cfg.Language
+	}
+	k8sLang := ""
+	if h.k8s != nil {
+		k8sLang = h.k8s.GetLanguageForService(ns, name)
+	}
+	return store.ResolveServiceLanguage(
+		fromSpans,
+		assigned,
+		k8sLang,
+		h.store.GetReportedLanguageForService(ns, name),
+	)
 }
 
 // GET /api/servicemap?namespace=
@@ -640,17 +647,7 @@ func (h *Handler) GetServiceMap(c *fiber.Ctx) error {
 	if data != nil {
 		cfgMap := h.store.GetApplicationConfigMap()
 		for i := range data.Nodes {
-			key := data.Nodes[i].Namespace + ":" + data.Nodes[i].ServiceName
-			if cfg, ok := cfgMap[key]; ok && cfg.Language != "" {
-				data.Nodes[i].Language = cfg.Language
-			} else {
-				if data.Nodes[i].Language == "" && h.k8s != nil {
-					data.Nodes[i].Language = h.k8s.GetLanguageForService(data.Nodes[i].Namespace, data.Nodes[i].ServiceName)
-				}
-				if data.Nodes[i].Language == "" {
-					data.Nodes[i].Language = h.store.GetReportedLanguageForService(data.Nodes[i].Namespace, data.Nodes[i].ServiceName)
-				}
-			}
+			data.Nodes[i].Language = h.resolveListedLanguage(data.Nodes[i].Namespace, data.Nodes[i].ServiceName, data.Nodes[i].Language, cfgMap)
 		}
 	}
 
@@ -971,12 +968,12 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 
 	if c.Method() == "POST" {
 		var req struct {
-			Cluster           string                         `json:"cluster"`
-			AgentNamespace    string                         `json:"agentNamespace"`
-			Namespaces        []string                       `json:"namespaces"`
-			Pods              []store.ReportedPod            `json:"pods"`
-			Nodes             []store.ReportedNode           `json:"nodes"`
-			Instrumentations  *[]store.ReportedInstrumentation `json:"instrumentations"`
+			Cluster          string                           `json:"cluster"`
+			AgentNamespace   string                           `json:"agentNamespace"`
+			Namespaces       []string                         `json:"namespaces"`
+			Pods             []store.ReportedPod              `json:"pods"`
+			Nodes            []store.ReportedNode             `json:"nodes"`
+			Instrumentations *[]store.ReportedInstrumentation `json:"instrumentations"`
 		}
 		if err := c.BodyParser(&req); err == nil {
 			if req.Cluster != "" {

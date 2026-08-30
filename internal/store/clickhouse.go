@@ -406,7 +406,11 @@ func (s *Store) refreshFromClickHouse() {
 		quantileIf(0.95)(duration_ns, %[1]s) / 1e6 AS p95,
 		quantileIf(0.99)(duration_ns, %[1]s) / 1e6 AS p99,
 		max(timestamp) AS last_seen,
-		anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] != '') AS sdk_lang
+		if(
+			anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] NOT IN ('', 'unknown', 'auto')) != '',
+			anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] NOT IN ('', 'unknown', 'auto')),
+			anyIf(tags['process.runtime.name'], tags['process.runtime.name'] NOT IN ('', 'unknown', 'auto'))
+		) AS sdk_lang
 	FROM kubetrace.spans
 	WHERE timestamp > now64(6) - INTERVAL %[2]d SECOND
 	GROUP BY namespace, service_name`, eligible, int(chStatsWindow.Seconds()))

@@ -337,7 +337,8 @@ func (w *Watcher) GetLanguageForService(namespace, serviceName string) string {
 	defer w.mu.RUnlock()
 	for _, pod := range w.pods {
 		if pod.Namespace == namespace && (pod.AppName == serviceName || strings.HasPrefix(pod.Name, serviceName)) {
-			if pod.Language != "" {
+			lang := strings.ToLower(strings.TrimSpace(pod.Language))
+			if lang != "" && lang != "unknown" && lang != "auto" && lang != "unk" {
 				return pod.Language
 			}
 		}
