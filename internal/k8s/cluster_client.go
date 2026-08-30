@@ -169,8 +169,9 @@ func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready i
 	for k, v := range template.Labels {
 		labels[k] = v
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: template.Annotations}, Spec: template.Spec}
-	lang := resolveLanguage("", template.Spec.Containers)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: template.Annotations, Labels: template.Labels}, Spec: template.Spec}
+	images, commands := containerImagesAndCommands(template.Spec.Containers)
+	lang := resolveInject(languageFromLabels(template.Labels), images, commands)
 	instr, _, details := detectInstrumentation(pod)
 	return WorkloadInfo{
 		Name:         name,

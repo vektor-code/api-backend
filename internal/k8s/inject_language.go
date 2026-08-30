@@ -53,6 +53,24 @@ func injectCanon(s string) string {
 	}
 }
 
+func languageFromLabels(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	for _, key := range []string{
+		"language",
+		"tech-stack",
+		"app.kubernetes.io/language",
+		"tags.datadoghq.com/language",
+		"instrumentation.opentelemetry.io/container-language",
+	} {
+		if val := strings.TrimSpace(labels[key]); val != "" {
+			return injectCanon(val)
+		}
+	}
+	return ""
+}
+
 func blobContains(s string, needles ...string) bool {
 	for _, n := range needles {
 		if strings.Contains(s, n) {
