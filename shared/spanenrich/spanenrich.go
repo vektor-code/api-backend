@@ -143,7 +143,10 @@ func (e *Enricher) Enrich(tags map[string]string, spanName, spanKind string) Res
 
 	e.applyQuery(tags, out.System, &out)
 	out.Namespace = tags["db.name"]
-	if httproute.TransactionIdentityEligible(spanKind, tags) {
+	if role := httproute.SpanRole(spanName, spanKind, tags); role != "" {
+		tags[httproute.TagSpanRole] = role
+	}
+	if httproute.TransactionIdentityEligible(spanKind, spanName, tags) {
 		out.Transaction = httproute.TransactionName(tags, spanName)
 	} else if strings.EqualFold(strings.TrimSpace(spanKind), "SERVER") {
 		tags[TagHTTPIdentity] = HTTPIdentityMalformed

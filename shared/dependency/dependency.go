@@ -294,6 +294,9 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 	if !CrossesProcessBoundary(spanKind) {
 		return Result{}, false
 	}
+	if IsNetworkSpanName(spanName) {
+		return Result{}, false
+	}
 	if tags == nil {
 		tags = map[string]string{}
 	}
@@ -302,6 +305,8 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 		"server.address", "net.peer.name", "network.peer.address", "net.peer.ip", "peer.service"))
 	port := firstNonEmpty(tags, "server.port", "net.peer.port", "network.peer.port", "peer.port")
 	host, port = splitHostPort(host, port)
+
+	httpNotDB := hasHTTPSignal(tags) && !hasDBSignal(tags)
 
 	// Tier 1 — the instrumentation stated the system outright.
 	//
@@ -330,12 +335,14 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 		}
 	}
 
-	// Tier 2 — operator-declared hosts and networks.
-	if r, ok := c.matchHostRules(host); ok {
-		return r, true
+	// Tier 2/3 — operator-declared hosts, CIDRs and well-known ports.
+	// Skip them when the span is already HTTP and has no query: a k8s API
+	// GET whose process also talks to Postgres must not become a database call.
+	if !httpNotDB {
+		if r, ok := c.matchHostRules(host); ok {
+			return r, true
+		}
 	}
-
-	// Tier 3 — well-known ports.
 	if r, ok := c.matchPort(port, host); ok {
 		return r, true
 	}
@@ -497,7 +504,7 @@ func tokenize(value string) map[string]bool {
 
 func hasDBSignal(tags map[string]string) bool {
 	for _, k := range []string{
-		"db.statement", "db.query.text", "db.name", "db.namespace",
+		"db.statement", "db.query.text",
 		"db.operation", "db.operation.name", "db.collection.name",
 	} {
 		if tags[k] != "" {
@@ -532,10 +539,23 @@ func hasMessagingSignal(tags map[string]string) bool {
 }
 
 func hasHTTPSignal(tags map[string]string) bool {
-	for _, k := range []string{"http.method", "http.request.method", "http.url", "url.full", "http.route"} {
+	for _, k := range []string{
+		"http.method", "http.request.method", "http.url", "url.full",
+		"http.route", "url.path", "http.target",
+	} {
 		if tags[k] != "" {
 			return true
 		}
+	}
+	return false
+}
+
+// IsNetworkSpanName reports socket/DNS/TLS primitives. They inherit the peer
+// of whatever the process talks to, so host/CIDR rules must not classify them.
+func IsNetworkSpanName(spanName string) bool {
+	switch strings.ToLower(strings.TrimSpace(spanName)) {
+	case "dns.lookup", "tcp.connect", "tls.connect", "connect", "http.connect", "net.http.connect":
+		return true
 	}
 	return false
 }

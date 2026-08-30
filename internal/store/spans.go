@@ -9,6 +9,7 @@ import (
 	"github.com/kubetrace/api-backend/internal/models"
 	"github.com/kubetrace/api-backend/internal/spantree"
 	"github.com/kubetrace/shared/connstr"
+	"github.com/kubetrace/shared/httproute"
 	"github.com/kubetrace/shared/spanenrich"
 )
 
@@ -96,6 +97,9 @@ func (s *Store) applyPodDatabaseHints(span *models.Span) {
 	if span.PodName == "" || span.Namespace == "" {
 		return
 	}
+	if !spanAcceptsDatabaseHints(span.Name, span.Kind, span.Attributes) {
+		return
+	}
 	for _, pod := range s.GetReportedPods(span.Namespace) {
 		if pod.Name != span.PodName {
 			continue
@@ -110,6 +114,25 @@ func (s *Store) applyPodDatabaseHints(span *models.Span) {
 			span.Attributes["server.port"] = pod.DatabasePort
 		}
 		return
+	}
+}
+
+// spanAcceptsDatabaseHints reports whether the pod's DATABASE_* env may be
+// copied onto this span. HTTP, DNS and TLS spans share the process with the
+// database client; stamping db.name onto them made every k8s API GET look like
+// a PostgreSQL call.
+func spanAcceptsDatabaseHints(name string, kind models.SpanKind, attrs map[string]string) bool {
+	if httproute.IsNetworkSpan(name) {
+		return false
+	}
+	if httproute.HasHTTPRequestSignal(attrs) {
+		return false
+	}
+	switch kind {
+	case models.SpanKindClient, models.SpanKindInternal:
+		return true
+	default:
+		return false
 	}
 }
 

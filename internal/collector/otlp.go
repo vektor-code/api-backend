@@ -92,6 +92,13 @@ func (r *Receiver) processRequest(req *colpb.ExportTraceServiceRequest) {
 			}
 		}
 
+		serviceName = resolveServiceName(resAttrs)
+		if namespace == "default" {
+			if ns := strings.TrimSpace(resAttrs["service.namespace"]); ns != "" {
+				namespace = ns
+			}
+		}
+
 		if r.store.IsNamespaceDisabled(namespace) {
 			continue
 		}
@@ -236,6 +243,30 @@ func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.S
 		}
 	}
 	return span
+}
+
+func resolveServiceName(resAttrs map[string]string) string {
+	name := strings.TrimSpace(resAttrs["service.name"])
+	if !isPlaceholderServiceName(name) {
+		return name
+	}
+	for _, k := range []string{
+		"k8s.deployment.name", "k8s.statefulset.name", "k8s.daemonset.name",
+		"k8s.cronjob.name", "k8s.job.name", "k8s.container.name",
+	} {
+		if v := strings.TrimSpace(resAttrs[k]); v != "" {
+			return v
+		}
+	}
+	if name != "" {
+		return name
+	}
+	return "unknown"
+}
+
+func isPlaceholderServiceName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return n == "" || n == "unknown" || n == "unknown_service" || strings.HasPrefix(n, "unknown_service:")
 }
 
 func spanLooksErrored(attrs map[string]string, events []models.SpanEvent) bool {

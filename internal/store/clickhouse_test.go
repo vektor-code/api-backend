@@ -81,6 +81,28 @@ func TestTraceMatchesOperationUsesTransactionName(t *testing.T) {
 	}
 }
 
+func TestChRoleHavingExcludesProbesAndBodies(t *testing.T) {
+	q := &models.SearchQuery{ExcludeProbes: true, ExcludeStreams: true}
+	having := chRoleHaving(q)
+	joined := strings.Join(having, " ")
+	if !strings.Contains(joined, "healthz") {
+		t.Fatalf("expected probe exclusion in role having:\n%s", joined)
+	}
+	if !strings.Contains(joined, "stream") {
+		t.Fatalf("expected stream exclusion in role having:\n%s", joined)
+	}
+	trueVal := true
+	q.HasBody = &trueVal
+	q.HttpMethod = "POST"
+	joined = strings.Join(chRoleHaving(q), " ")
+	if !strings.Contains(joined, "http.request.body") {
+		t.Fatalf("expected body filter:\n%s", joined)
+	}
+	if !strings.Contains(joined, "POST") {
+		t.Fatalf("expected method filter:\n%s", joined)
+	}
+}
+
 func TestChQueryBoundsUsesRetentionWindow(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	s := &Store{retentionHours: 720}

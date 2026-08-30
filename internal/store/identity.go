@@ -11,14 +11,14 @@ func isRequestSpan(span *models.Span) bool {
 	if span == nil {
 		return false
 	}
-	return httproute.RequestIdentityEligible(string(span.Kind), span.Attributes)
+	return httproute.RequestIdentityEligible(string(span.Kind), span.Name, span.Attributes)
 }
 
 func isTransactionSpan(span *models.Span) bool {
 	if span == nil {
 		return false
 	}
-	return httproute.TransactionIdentityEligible(string(span.Kind), span.Attributes)
+	return httproute.TransactionIdentityEligible(string(span.Kind), span.Name, span.Attributes)
 }
 
 func traceHasTransactionIdentity(trace *models.Trace) bool {

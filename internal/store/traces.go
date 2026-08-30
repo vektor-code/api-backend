@@ -250,6 +250,9 @@ func (s *Store) SearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, er
 		if q.TraceID == "" && !traceHasTransactionIdentity(trace) {
 			continue
 		}
+		if q.TraceID == "" && !traceMatchesRoleFilters(trace, q) {
+			continue
+		}
 
 		candidates = append(candidates, candidate{trace.TraceID, trace.StartTime})
 
@@ -298,6 +301,54 @@ func traceMatchesOperation(trace *models.Trace, operation string) bool {
 	rootName := strings.ToLower(ident.Name)
 	transactionName := strings.ToLower(httproute.TransactionName(ident.Attributes, ident.Name))
 	return strings.Contains(rootName, target) || strings.Contains(transactionName, target)
+}
+
+func traceMatchesRoleFilters(trace *models.Trace, q *models.SearchQuery) bool {
+	if trace == nil || q == nil {
+		return true
+	}
+	hasServer := false
+	hasNonProbeServer := false
+	hasNonStreamServer := false
+	hasBody := false
+	hasMethod := false
+	wantMethod := strings.ToUpper(strings.TrimSpace(q.HttpMethod))
+	for _, sp := range trace.Spans {
+		if sp == nil {
+			continue
+		}
+		if httproute.HasHTTPRequestSignal(sp.Attributes) {
+			if sp.Attributes["http.request.body"] != "" || sp.Attributes["http.response.body"] != "" {
+				hasBody = true
+			}
+			if wantMethod != "" && strings.EqualFold(httproute.HTTPMethodFromTags(sp.Attributes), wantMethod) {
+				hasMethod = true
+			}
+		}
+		if !strings.EqualFold(string(sp.Kind), "SERVER") {
+			continue
+		}
+		hasServer = true
+		if !httproute.IsProbe(sp.Name, sp.Attributes) {
+			hasNonProbeServer = true
+		}
+		if !httproute.IsStreaming(sp.Name, sp.Attributes) {
+			hasNonStreamServer = true
+		}
+	}
+	if q.ExcludeProbes && hasServer && !hasNonProbeServer {
+		return false
+	}
+	if q.ExcludeStreams && hasServer && !hasNonStreamServer {
+		return false
+	}
+	if q.HasBody != nil && *q.HasBody != hasBody {
+		return false
+	}
+	if wantMethod != "" && !hasMethod {
+		return false
+	}
+	return true
 }
 
 // buildTraceListItem assembles the list-view summary of a trace, including

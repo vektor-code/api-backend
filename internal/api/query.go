@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -9,13 +10,16 @@ import (
 
 func parseSearchQuery(c *fiber.Ctx, defaultLimit int) *models.SearchQuery {
 	q := &models.SearchQuery{
-		Namespace:   c.Query("namespace"),
-		Cluster:     c.Query("cluster"),
-		ServiceName: c.Query("service"),
-		Operation:   c.Query("operation"),
-		TraceID:     c.Query("traceId"),
-		Limit:       c.QueryInt("limit", defaultLimit),
-		Offset:      c.QueryInt("offset", 0),
+		Namespace:      c.Query("namespace"),
+		Cluster:        c.Query("cluster"),
+		ServiceName:    c.Query("service"),
+		Operation:      c.Query("operation"),
+		TraceID:        c.Query("traceId"),
+		HttpMethod:     strings.ToUpper(strings.TrimSpace(c.Query("httpMethod"))),
+		Limit:          c.QueryInt("limit", defaultLimit),
+		Offset:         c.QueryInt("offset", 0),
+		ExcludeProbes:  c.Query("excludeProbes") != "false",
+		ExcludeStreams: c.Query("excludeStreams") != "false",
 	}
 
 	switch c.Query("hasError") {
@@ -25,6 +29,15 @@ func parseSearchQuery(c *fiber.Ctx, defaultLimit int) *models.SearchQuery {
 	case "false":
 		f := false
 		q.HasError = &f
+	}
+
+	switch c.Query("hasBody") {
+	case "true":
+		t := true
+		q.HasBody = &t
+	case "false":
+		f := false
+		q.HasBody = &f
 	}
 
 	if minSpans := c.QueryInt("minSpans", 0); minSpans > 0 {

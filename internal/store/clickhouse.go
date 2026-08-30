@@ -193,11 +193,11 @@ const chRootSpanPredicate = "parent_span_id = '' OR match(parent_span_id, '^0+$'
 // stay in the trace; they must not mint Top Transactions identity. Duration
 // aggregation is unchanged.
 func chEndpointRootPredicate() string {
-	return "((" + chRootSpanPredicate + ") AND " + httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind") + ")"
+	return "((" + chRootSpanPredicate + ") AND " + httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind", "operation_name") + ")"
 }
 
 func chIncomingSpanPredicate() string {
-	return httproute.CHRequestIdentityEligible("kind", "tags")
+	return httproute.CHRequestIdentityEligible("kind", "tags", "operation_name")
 }
 
 // chAnyIfTransactionExpr picks the earliest incoming SERVER/CONSUMER span
@@ -344,10 +344,34 @@ func chRowToSpan(row map[string]any) *models.Span {
 	if span.Kind == "" {
 		span.Kind = models.SpanKindInternal
 	}
+	if txn := chString(row["transaction_name"]); txn != "" {
+		if span.Attributes == nil {
+			span.Attributes = map[string]string{}
+		}
+		if span.Attributes["crnet.apm.transaction"] == "" {
+			span.Attributes["crnet.apm.transaction"] = txn
+		}
+	}
+	if sys := chString(row["dep_system"]); sys != "" {
+		if span.Attributes == nil {
+			span.Attributes = map[string]string{}
+		}
+		if span.Attributes["crnet.apm.dependency.system"] == "" {
+			span.Attributes["crnet.apm.dependency.system"] = sys
+		}
+	}
+	if kind := chString(row["dep_kind"]); kind != "" {
+		if span.Attributes == nil {
+			span.Attributes = map[string]string{}
+		}
+		if span.Attributes["crnet.apm.dependency.kind"] == "" {
+			span.Attributes["crnet.apm.dependency.kind"] = kind
+		}
+	}
 	return span
 }
 
-const chSpanColumns = "timestamp, trace_id, span_id, parent_span_id, service_name, operation_name, duration_ns, status_code, status_message, tags, namespace, cluster, kind, pod_name, node_name, events"
+const chSpanColumns = "timestamp, trace_id, span_id, parent_span_id, service_name, operation_name, duration_ns, status_code, status_message, tags, namespace, cluster, kind, pod_name, node_name, events, transaction_name, dep_system, dep_kind, sample_weight"
 
 // runClickHouseRefresh replaces the MinIO gossip loop in ClickHouse mode:
 // it periodically rebuilds the in-memory statsCache and recentTraces from
@@ -372,7 +396,7 @@ func (s *Store) refreshFromClickHouse() {
 	defer cancel()
 
 	// 1. Service statistics with real percentiles.
-	eligible := httproute.CHRequestIdentityEligible("kind", "tags")
+	eligible := httproute.CHRequestIdentityEligible("kind", "tags", "operation_name")
 	statsQuery := fmt.Sprintf(`SELECT
 		namespace, service_name,
 		any(cluster) AS cluster,
@@ -539,7 +563,7 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 		having = append(having, chOperationHaving(q.Operation))
 	}
 	if q.TraceID == "" {
-		having = append(having, fmt.Sprintf("countIf(%s) > 0", httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind")))
+		having = append(having, fmt.Sprintf("countIf(%s) > 0", httproute.CHTransactionIdentityEligible("kind", "tags", "dep_kind", "operation_name")))
 	}
 	if q.MinSpans > 0 {
 		having = append(having, fmt.Sprintf("count() >= %d", q.MinSpans))
@@ -549,6 +573,9 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 	}
 	if q.MaxDurationMs > 0 {
 		having = append(having, fmt.Sprintf("(max(toUnixTimestamp64Milli(timestamp) + intDiv(duration_ns, 1000000)) - min(toUnixTimestamp64Milli(timestamp))) <= %d", int64(q.MaxDurationMs)))
+	}
+	if q.TraceID == "" {
+		having = append(having, chRoleHaving(q)...)
 	}
 
 	limit := q.Limit
@@ -674,7 +701,40 @@ func (s *Store) chEndpointFilters(q *models.SearchQuery) (where []string, having
 	if q.MaxDurationMs > 0 {
 		having = append(having, fmt.Sprintf("(max(toUnixTimestamp64Milli(timestamp) + intDiv(duration_ns, 1000000)) - min(toUnixTimestamp64Milli(timestamp))) <= %d", int64(q.MaxDurationMs)))
 	}
+	if q.TraceID == "" {
+		having = append(having, chRoleHaving(q)...)
+	}
 	return where, having, start, end
+}
+
+func chRoleHaving(q *models.SearchQuery) []string {
+	if q == nil {
+		return nil
+	}
+	var having []string
+	probe := httproute.CHProbeSpan("tags", "operation_name")
+	stream := httproute.CHStreamSpan("tags", "operation_name")
+	if q.ExcludeProbes {
+		having = append(having, fmt.Sprintf("(countIf(upperUTF8(kind) = 'SERVER' AND NOT %s) > 0 OR countIf(upperUTF8(kind) = 'SERVER') = 0)", probe))
+	}
+	if q.ExcludeStreams {
+		having = append(having, fmt.Sprintf("(countIf(upperUTF8(kind) = 'SERVER' AND NOT %s) > 0 OR countIf(upperUTF8(kind) = 'SERVER') = 0)", stream))
+	}
+	if q.HasBody != nil {
+		body := "(tags['http.request.body'] != '' OR tags['http.response.body'] != '')"
+		if *q.HasBody {
+			having = append(having, "countIf("+body+") > 0")
+		} else {
+			having = append(having, "countIf("+body+") = 0")
+		}
+	}
+	if q.HttpMethod != "" {
+		having = append(having, fmt.Sprintf(
+			"countIf(upperUTF8(if(tags['http.request.method'] != '', tags['http.request.method'], tags['http.method'])) = '%s') > 0",
+			chEscape(q.HttpMethod),
+		))
+	}
+	return having
 }
 
 // chAggregateEndpoints returns stable per-endpoint aggregates over the whole

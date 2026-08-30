@@ -14,16 +14,17 @@ func normalizedSpanKind(kind string) string {
 //
 //   - SERVER is an entrypoint (HTTP still requires a token-valid method)
 //   - CONSUMER is an entrypoint (messaging receive)
-//   - INTERNAL is an entrypoint only when it is not datastore work (cron/custom)
+//   - INTERNAL is an entrypoint only for cron/custom work, not DNS/TLS/ORM
 //   - CLIENT and PRODUCER are always dependencies, even when they are trace roots
-func TransactionIdentityEligible(kind string, tags map[string]string) bool {
+//   - Kubernetes probes and streaming RPCs are not user transactions
+func TransactionIdentityEligible(kind, spanName string, tags map[string]string) bool {
 	switch normalizedSpanKind(kind) {
 	case "CLIENT", "PRODUCER":
 		return false
 	case "CONSUMER":
 		return true
 	case "INTERNAL":
-		return !isDatastoreSpan(tags)
+		return InternalEntrypointEligible(spanName, tags)
 	case "SERVER":
 		return HTTPServerIdentityEligible("SERVER", tags)
 	default:
@@ -33,10 +34,14 @@ func TransactionIdentityEligible(kind string, tags map[string]string) bool {
 
 // RequestIdentityEligible reports whether a span should count as incoming
 // throughput for a service. INTERNAL work can name a transaction when it is
-// the root, but it is not HTTP/messaging intake.
-func RequestIdentityEligible(kind string, tags map[string]string) bool {
+// the root, but it is not HTTP/messaging intake. Probes are excluded so a
+// failing /healthz cannot set error rate to 100%.
+func RequestIdentityEligible(kind, spanName string, tags map[string]string) bool {
 	switch normalizedSpanKind(kind) {
 	case "SERVER":
+		if IsProbe(spanName, tags) {
+			return false
+		}
 		return HTTPServerIdentityEligible("SERVER", tags)
 	case "CONSUMER":
 		return true
@@ -68,29 +73,36 @@ func isDatastoreSpan(tags map[string]string) bool {
 	return strings.Contains(thread, "hikari")
 }
 
-func chNonDatastoreInternalSQL(kindCol, tagsCol, depKindCol string) string {
+func chNonDatastoreInternalSQL(kindCol, tagsCol, depKindCol, opCol string) string {
 	return fmt.Sprintf(
-		"(upperUTF8(%s) = 'INTERNAL' AND %s NOT IN ('database', 'cache') AND %s['db.system'] = '' AND %s['db.system.name'] = '' AND %s['db.statement'] = '' AND %s['db.query.text'] = '' AND %s['db.operation'] = '' AND %s['db.operation.name'] = '' AND positionCaseInsensitive(%s['thread.name'], 'hikari') = 0)",
-		kindCol, depKindCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol,
+		"(upperUTF8(%s) = 'INTERNAL' AND %s NOT IN ('database', 'cache') AND %s['db.system'] = '' AND %s['db.system.name'] = '' AND %s['db.statement'] = '' AND %s['db.query.text'] = '' AND %s['db.operation'] = '' AND %s['db.operation.name'] = '' AND positionCaseInsensitive(%s['thread.name'], 'hikari') = 0 AND %s != '' AND %s)",
+		kindCol, depKindCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol, tagsCol, opCol, chInternalNoiseSQL(opCol),
 	)
 }
 
 // CHTransactionIdentityEligible is the ClickHouse predicate with the same
 // semantics as TransactionIdentityEligible.
-func CHTransactionIdentityEligible(kindCol, tagsCol, depKindCol string) string {
+func CHTransactionIdentityEligible(kindCol, tagsCol, depKindCol, opCol string) string {
+	if opCol == "" {
+		opCol = "operation_name"
+	}
 	httpOK := CHHTTPServerIdentityEligible(kindCol, tagsCol)
 	return fmt.Sprintf(
 		"((upperUTF8(%s) = 'SERVER' AND %s) OR upperUTF8(%s) = 'CONSUMER' OR %s)",
-		kindCol, httpOK, kindCol, chNonDatastoreInternalSQL(kindCol, tagsCol, depKindCol),
+		kindCol, httpOK, kindCol, chNonDatastoreInternalSQL(kindCol, tagsCol, depKindCol, opCol),
 	)
 }
 
 // CHRequestIdentityEligible is the ClickHouse predicate with the same
 // semantics as RequestIdentityEligible.
-func CHRequestIdentityEligible(kindCol, tagsCol string) string {
+func CHRequestIdentityEligible(kindCol, tagsCol, opCol string) string {
+	if opCol == "" {
+		opCol = "operation_name"
+	}
 	httpOK := CHHTTPServerIdentityEligible(kindCol, tagsCol)
+	notProbe := "NOT " + CHProbeSpan(tagsCol, opCol)
 	return fmt.Sprintf(
-		"((upperUTF8(%s) = 'SERVER' AND %s) OR upperUTF8(%s) = 'CONSUMER')",
-		kindCol, httpOK, kindCol,
+		"((upperUTF8(%s) = 'SERVER' AND %s AND %s) OR upperUTF8(%s) = 'CONSUMER')",
+		kindCol, httpOK, notProbe, kindCol,
 	)
 }

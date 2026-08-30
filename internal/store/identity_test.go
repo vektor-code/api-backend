@@ -110,6 +110,9 @@ func TestIsRequestSpan(t *testing.T) {
 	if !isRequestSpan(&models.Span{Kind: models.SpanKindServer, Attributes: map[string]string{"http.request.method": "GET", "url.path": "/"}}) {
 		t.Fatal("HTTP SERVER must count as a request")
 	}
+	if isRequestSpan(&models.Span{Kind: models.SpanKindServer, Name: "GET /healthz", Attributes: map[string]string{"http.request.method": "GET", "url.path": "/healthz"}}) {
+		t.Fatal("probe SERVER must not count as incoming throughput")
+	}
 	if isRequestSpan(&models.Span{Kind: models.SpanKindInternal}) {
 		t.Fatal("INTERNAL must not count as incoming throughput")
 	}

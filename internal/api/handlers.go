@@ -564,6 +564,9 @@ func (h *Handler) GetServices(c *fiber.Ctx) error {
 		if h.store.IsNamespaceDisabled(p.Namespace) || !nsAllowed(allowed, p.Namespace) {
 			continue
 		}
+		if c.Query("includeIdle") != "true" {
+			continue
+		}
 		svcName := p.ServiceName()
 		if svcName == "" {
 			continue

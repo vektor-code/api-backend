@@ -320,6 +320,26 @@ func TestRedisBackedQueueIsMessagingNotCache(t *testing.T) {
 	}
 }
 
+func TestHTTPClientIsNotDatabaseFromPeerCIDR(t *testing.T) {
+	c := testClassifier(t)
+	tags := map[string]string{
+		"http.request.method": "GET",
+		"url.path":            "/apis/apps/v1/namespaces/default/deployments/x",
+		"server.address":      "crtnet-ext-k8s-ha.cloudraft.dc",
+	}
+	if _, ok := c.Classify(tags, "GET", "CLIENT"); ok {
+		t.Fatal("HTTP CLIENT must not be classified as a database even when db.name is present from pod hints")
+	}
+}
+
+func TestDNSLookupIsNotPostgreSQL(t *testing.T) {
+	c := testClassifier(t)
+	tags := map[string]string{"net.peer.name": "172.16.45.15", "server.address": "172.16.45.15"}
+	if got, ok := c.Classify(tags, "dns.lookup", "CLIENT"); ok {
+		t.Fatalf("dns.lookup classified as %+v", got)
+	}
+}
+
 // Laravel's queue instrumentation emits a full set of messaging.* attributes
 // and no messaging.system. Those spans were left unclassified.
 func TestQueueSpanWithoutBrokerNameIsStillMessaging(t *testing.T) {

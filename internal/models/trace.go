@@ -162,6 +162,14 @@ type SearchQuery struct {
 	EndTime       time.Time `json:"endTime"`
 	Limit         int       `json:"limit"`
 	Offset        int       `json:"offset"`
+	// HttpMethod filters traces that contain that HTTP method on an inbound span.
+	HttpMethod string `json:"httpMethod,omitempty"`
+	// HasBody, when set, keeps traces that store a captured HTTP body.
+	HasBody *bool `json:"hasBody,omitempty"`
+	// ExcludeProbes drops Kubernetes/Spring health hits. Default true at parse time.
+	ExcludeProbes bool `json:"excludeProbes"`
+	// ExcludeStreams drops long-lived RPC streams from Top transactions.
+	ExcludeStreams bool `json:"excludeStreams"`
 }
 
 // EndpointStat is a stable per-endpoint (root service + root operation)
