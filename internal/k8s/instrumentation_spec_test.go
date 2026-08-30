@@ -31,6 +31,34 @@ func TestBuildInstrumentationObjectUsesFastExport(t *testing.T) {
 	}
 }
 
+func TestBuildInstrumentationObjectCapturesHTTPHeaders(t *testing.T) {
+	inst := BuildInstrumentationObject("troni-dev", "crnet-apm")
+	env := inst["spec"].(map[string]interface{})["env"].([]interface{})
+	if got := envValue(env, "CRNET_HTTP_CAPTURE"); got != "true" {
+		t.Fatalf("CRNET_HTTP_CAPTURE = %q", got)
+	}
+	if got := envValue(env, "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST"); got == "" {
+		t.Fatal("expected HTTP header capture allowlist")
+	}
+}
+
+func TestCrnetLanguageAgentsReplaceOfficialInjectors(t *testing.T) {
+	t.Setenv("CRNET_AGENT_JAVA_IMAGE", "registry.example/instrumentation-java:dev")
+	t.Setenv("CRNET_AGENT_PYTHON_IMAGE", "registry.example/instrumentation-python:dev")
+	t.Setenv("CRNET_AGENT_NODEJS_IMAGE", "registry.example/instrumentation-nodejs:dev")
+	inst := BuildInstrumentationObject("troni-dev", "crnet-apm")
+	spec := inst["spec"].(map[string]interface{})
+	if spec["java"].(map[string]interface{})["image"] != "registry.example/instrumentation-java:dev" {
+		t.Fatalf("java injector = %#v", spec["java"])
+	}
+	if spec["python"].(map[string]interface{})["image"] != "registry.example/instrumentation-python:dev" {
+		t.Fatalf("python injector = %#v", spec["python"])
+	}
+	if spec["nodejs"].(map[string]interface{})["image"] != "registry.example/instrumentation-nodejs:dev" {
+		t.Fatalf("nodejs injector = %#v", spec["nodejs"])
+	}
+}
+
 func TestBuildCompatibleInstrumentationObjectOmitsOptionalFields(t *testing.T) {
 	spec := BuildCompatibleInstrumentationObject("troni-dev", "crnet-apm")["spec"].(map[string]interface{})
 	if _, ok := spec["apacheHttpd"]; ok {

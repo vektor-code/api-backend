@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/kubetrace/shared/dependency"
+	"github.com/kubetrace/shared/httpcapture"
 	"github.com/kubetrace/shared/httproute"
 	"github.com/kubetrace/shared/semconv"
 	"github.com/kubetrace/shared/sqlnorm"
@@ -129,6 +130,7 @@ func (e *Enricher) Enrich(tags map[string]string, spanName, spanKind string) Res
 	}
 
 	semconv.Normalize(tags)
+	httpcapture.SanitizeBodies(tags, httpcapture.DefaultMaxBytes)
 
 	var out Result
 	if res, ok := e.classifier.Classify(tags, spanName, spanKind); ok {

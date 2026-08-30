@@ -43,6 +43,8 @@ var aliasRules = []aliasRule{
 	{canonical: "http.target", sources: []string{"url.path"}, backfill: true},
 	{canonical: "http.status_code", sources: []string{"http.response.status_code"}, backfill: true},
 	{canonical: "http.route", sources: []string{"url.template"}},
+	{canonical: "http.request.body", sources: []string{"request.body", "http.request_body"}, backfill: true},
+	{canonical: "http.response.body", sources: []string{"response.body", "http.response_body"}, backfill: true},
 
 	// --- network peer ---
 	// peer.service is a logical service name rather than a host, so it is read

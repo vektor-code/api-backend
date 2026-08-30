@@ -51,7 +51,12 @@ func upsertInstrumentation(ctx context.Context, dyn dynamic.Interface, namespace
 // retrying with a trimmed spec if the operator CRD rejects optional fields.
 func ApplyInstrumentationCR(ctx context.Context, dyn dynamic.Interface, namespace, agentNamespace string) error {
 	name := InstrumentationName(namespace)
-	err := upsertInstrumentation(ctx, dyn, namespace, name, BuildInstrumentationObject(namespace, agentNamespace))
+	full := BuildInstrumentationObject(namespace, agentNamespace)
+	err := upsertInstrumentation(ctx, dyn, namespace, name, full)
+	if err != nil && instrumentationSpecRejected(err) {
+		log.Printf("[k8s] instrumentation extensions rejected in %s (%v); retrying without java extensions", namespace, err)
+		err = upsertInstrumentation(ctx, dyn, namespace, name, stripJavaExtensions(BuildInstrumentationObject(namespace, agentNamespace)))
+	}
 	if err != nil && instrumentationSpecRejected(err) {
 		log.Printf("[k8s] full instrumentation spec rejected in %s (%v); retrying compatible spec", namespace, err)
 		err = upsertInstrumentation(ctx, dyn, namespace, name, BuildCompatibleInstrumentationObject(namespace, agentNamespace))

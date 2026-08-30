@@ -61,7 +61,7 @@ func batchAndLimitEnv() []interface{} {
 		kv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", envOr("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "512")),
 		kv("OTEL_BSP_MAX_QUEUE_SIZE", envOr("OTEL_BSP_MAX_QUEUE_SIZE", "2048")),
 		kv("OTEL_BSP_EXPORT_TIMEOUT", envOr("OTEL_BSP_EXPORT_TIMEOUT", "30000")),
-		kv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", envOr("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "128")),
+		kv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", envOr("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "192")),
 		kv("OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", envOr("OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", "4096")),
 	}
 }
@@ -150,10 +150,10 @@ func buildInstrumentationObjectOpts(namespace, agentNamespace string, compatible
 		},
 		"propagators": propagators,
 		"sampler":     otelSampler(),
-		"env":         optimizedInstrumentationEnv(),
-		"java":        languageInstrumentationSpec(instrumentationImages.java),
-		"nodejs":      languageInstrumentationSpec(instrumentationImages.nodejs),
-		"python":      pythonInstrumentationSpec(instrumentationImages.python, httpEndpoint),
+		"env":         withHTTPCapture(optimizedInstrumentationEnv()),
+		"java":        javaInstrumentationSpec(instrumentationImages.java),
+		"nodejs":      nodejsInstrumentationSpec(instrumentationImages.nodejs),
+		"python":      pythonCaptureInstrumentationSpec(instrumentationImages.python, httpEndpoint),
 		"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
 		"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint),
 	}
