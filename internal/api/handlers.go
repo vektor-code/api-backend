@@ -1744,7 +1744,7 @@ func (h *Handler) ClearAllTraces(c *fiber.Ctx) error {
 		}
 	}
 
-	count, err := h.store.DeleteAllMinioTraces()
+	count, err := h.store.PurgeAllTraces()
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}

@@ -5,12 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/kubetrace/api-backend/internal/models"
@@ -256,6 +253,9 @@ func (s *Store) runMinioGC() {
 }
 
 func (s *Store) cleanOldMinioTraces() {
+	if s.client == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -296,79 +296,4 @@ func (s *Store) cleanOldMinioTraces() {
 	}
 
 	log.Printf("[GC] MinIO log retention cleanup finished. Removed %d objects.", count)
-}
-
-// DeleteAllMinioTraces removes all traces under traces/ prefix from MinIO bucket
-// and clears in-memory caches.
-func (s *Store) DeleteAllMinioTraces() (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	objectsCh := make(chan minio.ObjectInfo, 100)
-	var count int64
-
-	go func() {
-		defer close(objectsCh)
-		for obj := range s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
-			Prefix:    "traces/",
-			Recursive: true,
-		}) {
-			if obj.Err != nil {
-				continue
-			}
-			objectsCh <- obj
-			count++
-		}
-	}()
-
-	errorCh := s.client.RemoveObjects(ctx, s.bucketName, objectsCh, minio.RemoveObjectsOptions{})
-	for err := range errorCh {
-		if err.Err != nil {
-			log.Printf("[GC] Error removing object %s during manual delete: %v", err.ObjectName, err.Err)
-		}
-	}
-
-	// Also clear memory caches so dashboard updates instantly
-	s.statsMu.Lock()
-	s.statsCache = make(map[string]*models.ServiceStats)
-	s.statsMu.Unlock()
-
-	s.tracesMu.Lock()
-	s.recentTraces = make(map[string]*models.Trace)
-	s.tracesMu.Unlock()
-
-	s.localMu.Lock()
-	s.localStats = make(map[string]*models.ServiceStats)
-	s.localTraces = make(map[string]*models.Trace)
-	s.localMu.Unlock()
-
-	s.InvalidateServiceMapCache()
-
-	// Clear ClickHouse spans
-	clickhouseURL := s.GetInfraConfig("CLICKHOUSE_URL", os.Getenv("CLICKHOUSE_URL"))
-	if clickhouseURL != "" {
-		chQuery := "TRUNCATE TABLE kubetrace.spans;"
-		chReq, err := http.NewRequestWithContext(ctx, "POST", clickhouseURL, strings.NewReader(chQuery))
-		if err == nil {
-			if chReq.URL.User != nil {
-				pass, _ := chReq.URL.User.Password()
-				chReq.SetBasicAuth(chReq.URL.User.Username(), pass)
-			}
-			chClient := &http.Client{Timeout: 10 * time.Second}
-			chResp, err := chClient.Do(chReq)
-			if err == nil {
-				if chResp.StatusCode == http.StatusOK {
-					log.Printf("[Sync] Successfully truncated ClickHouse spans table.")
-				} else {
-					body, _ := io.ReadAll(chResp.Body)
-					log.Printf("[Sync] ClickHouse truncation failed (status %d): %s", chResp.StatusCode, string(body))
-				}
-				chResp.Body.Close()
-			} else {
-				log.Printf("[Sync] Error executing ClickHouse truncation request: %v", err)
-			}
-		}
-	}
-
-	return count, nil
 }
