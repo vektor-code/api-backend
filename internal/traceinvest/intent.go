@@ -26,19 +26,20 @@ func BuildIntent(trace *models.Trace, diag *tracediag.Diagnosis, clusterID strin
 		clusterID = "default"
 	}
 	in := Intent{
-		InvestigationType: invType,
-		ClusterID:         clusterID,
-		Namespace:         target.Namespace,
-		SourceWorkload:    target.Workload,
-		SourcePod:         target.SourcePod,
-		Destination:       destination(target),
-		DestinationURL:    target.DestURL,
-		DestinationType:   target.DestType,
-		RecordedHTTP:      target.RecordedHTTP,
-		Checks:            ChecksFor(target, plan.MaxLevel),
-		MaxLevel:          plan.MaxLevel,
-		TraceID:           traceID(trace, diag),
-		ExpiresAt:         now.Add(jobTTL),
+		InvestigationType:   invType,
+		ClusterID:           clusterID,
+		Namespace:           target.Namespace,
+		SourceWorkload:      target.Workload,
+		SourcePod:           target.SourcePod,
+		Destination:         destination(target),
+		DestinationURL:      target.DestURL,
+		DestinationType:     target.DestType,
+		DestinationProtocol: target.DestProtocol,
+		RecordedHTTP:        target.RecordedHTTP,
+		Checks:              ChecksFor(target, plan.MaxLevel),
+		MaxLevel:            plan.MaxLevel,
+		TraceID:             traceID(trace, diag),
+		ExpiresAt:           now.Add(jobTTL),
 	}
 	in.Fingerprint = Fingerprint(in)
 	return in, true

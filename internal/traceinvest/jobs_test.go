@@ -15,11 +15,11 @@ func healthzTrace() (*models.Trace, *tracediag.Diagnosis) {
 		TraceID: "t-connrefused", SpanID: "c1", Name: "GET /g/collect", ServiceName: "highping-client",
 		Namespace: "highping-dev", PodName: "highping-client-abc", Kind: models.SpanKindClient,
 		Status: models.SpanStatusError, DurationMs: 2.7, StartTime: now, EndTime: now.Add(3 * time.Millisecond),
-		Error:  "connection refused",
+		Error: "connection refused",
 		Attributes: map[string]string{
-			"http.request.method":        "GET",
-			"url.path":                   "/g/collect",
-			"url.full":                   "http://10.233.115.249:8080/g/collect",
+			"http.request.method":       "GET",
+			"url.path":                  "/g/collect",
+			"url.full":                  "http://10.233.115.249:8080/g/collect",
 			"http.response.status_code": "0",
 			"error.message":             "connection refused",
 		},
@@ -116,12 +116,12 @@ func TestStoreCoalescesSameFingerprint(t *testing.T) {
 	}
 
 	s.Submit(Result{
-		Fingerprint: first.Fingerprint,
-		Status:      StatusComplete,
-		Inference:   "backend is likely responsible",
+		Fingerprint:   first.Fingerprint,
+		Status:        StatusComplete,
+		Inference:     "backend is likely responsible",
 		OriginalState: "TRANSPORT / UPSTREAM CONNECTIVITY",
 		CurrentState:  "NOT REPRODUCED",
-		Confidence:  "HIGH",
+		Confidence:    "HIGH",
 		Observations: []Observation{
 			{Kind: KindObserved, Code: "http_status", Message: "HTTP 503 returned by target", OK: boolPtr(false), Level: 2},
 			{Kind: KindObserved, Code: "pod_status", Message: "target pod is Ready", OK: boolPtr(true), Level: 1},
@@ -215,6 +215,37 @@ func TestExtractTargetUsesAffectedSpanNotFirstClient(t *testing.T) {
 	}
 	if got.DestType != "external_dns" {
 		t.Fatalf("type=%s", got.DestType)
+	}
+}
+
+func TestExtractTargetPostgresDoesNotSynthesizeHTTP(t *testing.T) {
+	leaf := &models.Span{
+		SpanID: "db", Kind: models.SpanKindInternal, ServiceName: "marketdatagw-backend",
+		Namespace: "troni-prod", PodName: "gw-a",
+		Attributes: map[string]string{
+			"server.address":   "172.16.45.31",
+			"server.port":      "5432",
+			"http.status_code": "500",
+		},
+	}
+	rpc := &models.Span{
+		SpanID: "rpc", Kind: models.SpanKindClient, ServiceName: "api-backend",
+		Namespace: "troni-prod", PodName: "api-a",
+		Attributes: map[string]string{"rpc.system": "grpc", "server.address": "marketdatagw", "url.full": "http://marketdatagw/x"},
+	}
+	tr := &models.Trace{
+		TraceID: "t-pg", Namespace: "troni-prod", ServiceName: "api-backend",
+		Spans: []*models.Span{rpc, leaf},
+	}
+	got := ExtractTarget(tr, &tracediag.Diagnosis{AffectedSpanIDs: []string{"rpc", "db"}})
+	if got.DestHost != "172.16.45.31" || got.DestPort != "5432" {
+		t.Fatalf("dest=%s:%s", got.DestHost, got.DestPort)
+	}
+	if got.DestProtocol != "postgresql" || got.CheckType != "tcp" {
+		t.Fatalf("protocol=%s check=%s", got.DestProtocol, got.CheckType)
+	}
+	if got.DestURL != "" {
+		t.Fatalf("must not synthesise HTTP URL for postgres, got %s", got.DestURL)
 	}
 }
 

@@ -20,6 +20,7 @@ type Target struct {
 	DestPath     string
 	DestURL      string
 	DestType     string
+	DestProtocol string
 	RecordedHTTP int
 	CheckType    string
 }
@@ -62,11 +63,21 @@ func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 		for _, id := range diag.AffectedSpanIDs {
 			ids[id] = struct{}{}
 		}
+		var first *models.Span
 		for _, sp := range trace.Spans {
-			if _, ok := ids[sp.SpanID]; ok {
+			if _, ok := ids[sp.SpanID]; !ok {
+				continue
+			}
+			if first == nil {
+				first = sp
+			}
+			if isStatefulRemote(sp) {
 				focus = sp
 				break
 			}
+		}
+		if focus == nil {
+			focus = first
 		}
 	}
 	if focus == nil && trace.RootSpan != nil {
@@ -149,16 +160,29 @@ func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 	if t.DestPath == "" {
 		t.DestPath = "/"
 	}
-	if t.DestURL == "" && t.DestHost != "" {
-		port := t.DestPort
-		if port == "" {
-			port = "80"
+	t.DestProtocol = protocolFromSpan(urlSpan, t.DestPort)
+	if t.DestProtocol == "http" || t.DestProtocol == "https" || t.DestProtocol == "" {
+		if t.DestURL == "" && t.DestHost != "" {
+			port := t.DestPort
+			if port == "" {
+				port = "80"
+			}
+			scheme := "http"
+			if port == "443" || t.DestProtocol == "https" {
+				scheme = "https"
+			}
+			t.DestURL = scheme + "://" + net.JoinHostPort(t.DestHost, port) + t.DestPath
 		}
-		t.DestURL = "http://" + net.JoinHostPort(t.DestHost, port) + t.DestPath
+		t.CheckType = "http"
+	} else {
+		t.DestURL = ""
+		t.CheckType = "tcp"
 	}
-	if status := attr(focus, "http.response.status_code", "http.status_code"); status != "" {
-		if n, err := strconv.Atoi(status); err == nil {
-			t.RecordedHTTP = n
+	if t.CheckType == "http" {
+		if status := attr(focus, "http.response.status_code", "http.status_code"); status != "" {
+			if n, err := strconv.Atoi(status); err == nil {
+				t.RecordedHTTP = n
+			}
 		}
 	}
 	if t.Namespace == "" {
@@ -166,6 +190,71 @@ func ExtractTarget(trace *models.Trace, diag *tracediag.Diagnosis) Target {
 	}
 	t.DestType = classifyDestinationType(t.DestHost)
 	return t
+}
+
+func isStatefulRemote(sp *models.Span) bool {
+	if sp == nil {
+		return false
+	}
+	if attr(sp, "db.system", "db.system.name", "db.statement", "db.query.text") != "" {
+		return true
+	}
+	port := attr(sp, "server.port", "net.peer.port")
+	if host := destHostOf(sp); host != "" {
+		if _, p, err := net.SplitHostPort(host); err == nil && p != "" && port == "" {
+			port = p
+		}
+	}
+	id := protocolFromPort(port)
+	return id != "" && id != "http" && id != "https"
+}
+
+func protocolFromSpan(sp *models.Span, port string) string {
+	if sys := attr(sp, "db.system", "db.system.name", "crnet.apm.dependency.system"); sys != "" {
+		return strings.ToLower(sys)
+	}
+	if sys := attr(sp, "rpc.system"); strings.EqualFold(sys, "grpc") {
+		return "grpc"
+	}
+	if id := protocolFromPort(port); id != "" {
+		return id
+	}
+	return "http"
+}
+
+func protocolFromPort(port string) string {
+	switch strings.TrimSpace(port) {
+	case "5432", "5433", "6432":
+		return "postgresql"
+	case "3306", "33060":
+		return "mysql"
+	case "6379", "6380":
+		return "redis"
+	case "27017", "27018", "27019":
+		return "mongodb"
+	case "9092", "9093", "9094":
+		return "kafka"
+	case "5672", "5671":
+		return "rabbitmq"
+	case "1433":
+		return "mssql"
+	case "1521":
+		return "oracle"
+	case "9200", "9300":
+		return "elasticsearch"
+	case "11211":
+		return "memcached"
+	case "2379":
+		return "etcd"
+	case "50051":
+		return "grpc"
+	case "443":
+		return "https"
+	case "80", "8080", "8000", "8443":
+		return "http"
+	default:
+		return ""
+	}
 }
 
 func classifyDestinationType(host string) string {

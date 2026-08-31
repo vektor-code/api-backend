@@ -148,12 +148,30 @@ func isDBSpan(sp *models.Span) bool {
 	if sp == nil {
 		return false
 	}
-	return attrPresent(sp,
+	if attrPresent(sp,
 		"db.system", "db.system.name",
 		"db.statement", "db.query.text",
 		"db.operation", "db.operation.name",
 		"db.name", "db.namespace",
-	)
+	) {
+		return true
+	}
+	kind := strings.ToLower(attr(sp, "crnet.apm.dependency.kind"))
+	if kind == "database" || kind == "cache" {
+		return true
+	}
+	port := attr(sp, "server.port", "net.peer.port")
+	if port == "" {
+		host := attr(sp, "server.address", "net.peer.name", "net.sock.peer.addr")
+		if i := strings.LastIndex(host, ":"); i > 0 && i < len(host)-1 && !strings.Contains(host[i+1:], "]") {
+			port = host[i+1:]
+		}
+	}
+	switch port {
+	case "5432", "5433", "6432", "3306", "1433", "1521", "27017", "6379", "11211", "9042", "9200":
+		return true
+	}
+	return false
 }
 
 func isMessagingSpan(sp *models.Span) bool {
@@ -164,7 +182,14 @@ func isMessagingSpan(sp *models.Span) bool {
 }
 
 func dbSystem(sp *models.Span) string {
-	return attr(sp, "db.system", "db.system.name")
+	if sys := attr(sp, "db.system", "db.system.name", "crnet.apm.dependency.system"); sys != "" {
+		return sys
+	}
+	port := attr(sp, "server.port", "net.peer.port")
+	if port == "5432" || port == "5433" || port == "6432" {
+		return "postgresql"
+	}
+	return ""
 }
 
 func failedSpan(sp *models.Span) bool {

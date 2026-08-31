@@ -118,13 +118,13 @@ func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
 		}
 	}
 
-	// Generate summary & dynamic recommendations (Davis AI style)
+	// Generate summary and remediations from the reconstructed trace.
 	var summaryParts []string
 	var issues []string
 	var remediations []string
 
 	if rootCauseSpan != nil {
-		summaryParts = append(summaryParts, fmt.Sprintf("CRNET APM Davis AI isolated the root failure to service '%s' (Span ID: %s) with error: '%s'.", rootCauseSpan.ServiceName, rootCauseSpan.SpanID, report.RootCauseMessage))
+		summaryParts = append(summaryParts, fmt.Sprintf("Analysis Engine isolated the root failure to service '%s' (Span ID: %s) with error: '%s'.", rootCauseSpan.ServiceName, rootCauseSpan.SpanID, report.RootCauseMessage))
 		issues = append(issues, fmt.Sprintf("Error in service '%s': %s", rootCauseSpan.ServiceName, report.RootCauseMessage))
 
 		msgLower := strings.ToLower(report.RootCauseMessage)
@@ -152,7 +152,7 @@ func AnalyzeTrace(trace *models.Trace) *DiagnosticReport {
 	}
 
 	if len(summaryParts) == 0 {
-		report.Summary = "Trace processed successfully. CRNET APM Davis AI detected no errors or performance anomalies."
+		report.Summary = "Trace processed successfully. Analysis Engine detected no errors or performance anomalies."
 		remediations = append(remediations, "No action required. Transaction execution is within healthy parameters.")
 	} else {
 		report.Summary = strings.Join(summaryParts, " Additionally, ")
