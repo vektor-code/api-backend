@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/shared/spanenrich"
 )
 
 // GetServiceMap returns a pre-built service dependency graph.
@@ -101,12 +102,31 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 				continue
 			}
 			// Check for external database or messaging infrastructure calls,
-			// or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs)
+			// or uninstrumented client calls (e.g. Vault, MinIO, external HTTP APIs).
+			// Prefer the shared classifier tags stamped at enrich time so a
+			// postgres call inferred from port still counts when db.system was
+			// missing on the original span.
+			depKind := strings.ToLower(sp.Attributes[spanenrich.TagKind])
+			depSystem := sp.Attributes[spanenrich.TagSystem]
 			dbSystem, hasDb := sp.Attributes["db.system"]
+			if dbSystem == "" && (depKind == "database" || depKind == "cache") {
+				hasDb = true
+				dbSystem = depSystem
+			} else {
+				hasDb = dbSystem != ""
+			}
 			messagingSystem, hasMsg := sp.Attributes["messaging.system"]
+			if messagingSystem == "" && depKind == "messaging" {
+				hasMsg = true
+				messagingSystem = depSystem
+			} else {
+				hasMsg = messagingSystem != ""
+			}
+			classifiedInfra := depKind == "storage" || depKind == "gateway" ||
+				depKind == "secrets" || depKind == "discovery" || depKind == "observability"
 			isClient := sp.Kind == models.SpanKindClient || sp.Kind == "CLIENT"
 
-			if hasDb || hasMsg || (isClient && !parentSet[sp.SpanID]) {
+			if hasDb || hasMsg || classifiedInfra || (isClient && !parentSet[sp.SpanID]) {
 				baseName := ""
 				targetNamespace := ""
 				if hasDb {
@@ -122,7 +142,7 @@ func (s *Store) buildServiceMap(namespace string) *models.ServiceMapData {
 
 				if baseName != "" {
 					// Use the snapshot — no lock re-acquisition needed
-					if isClient && !hasDb && !hasMsg && isMicroserviceFromSnapshot(statsCacheSnapshot, sp.Namespace, baseName) {
+					if isClient && !hasDb && !hasMsg && !classifiedInfra && isMicroserviceFromSnapshot(statsCacheSnapshot, sp.Namespace, baseName) {
 						if targetNamespace == "" {
 							targetNamespace = resolveServiceNamespaceFromSnapshot(statsCacheSnapshot, sp.Namespace, baseName)
 						}

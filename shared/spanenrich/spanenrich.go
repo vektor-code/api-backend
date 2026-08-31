@@ -172,9 +172,9 @@ func (e *Enricher) applyClassification(tags map[string]string, res dependency.Re
 		}
 	}
 
-	// Gateways, storage, secret stores and observability endpoints are recorded
-	// only under the crnet-apm.* tags. Writing them to db.system is what used to
-	// put nginx and Vault on the database dashboard.
+	// Gateways, storage, RPC, secret stores and observability endpoints are
+	// recorded only under the crnet-apm.* tags. Writing them to db.system is
+	// what used to put nginx and Vault on the database dashboard.
 	tags[TagSystem] = res.System
 	tags[TagKind] = string(res.Kind)
 	tags[TagEvidence] = res.Evidence

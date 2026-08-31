@@ -161,13 +161,22 @@ func TestCollectionAliases(t *testing.T) {
 	}
 }
 
-// peer.service is a logical service name, not a host, so it may seed
-// server.address but must never be overwritten by it.
+// peer.service is a logical service name, not a host: it must neither seed
+// server.address nor be overwritten by it.
 func TestPeerServiceIsNotBackfilled(t *testing.T) {
 	tags := map[string]string{"server.address": "10.0.0.5"}
 	Normalize(tags)
 	if tags["peer.service"] != "" {
 		t.Errorf("peer.service should stay empty, got %q", tags["peer.service"])
+	}
+
+	tags = map[string]string{"peer.service": "postgres"}
+	Normalize(tags)
+	if tags["server.address"] != "" {
+		t.Errorf("peer.service must not seed server.address, got %q", tags["server.address"])
+	}
+	if tags["peer.service"] != "postgres" {
+		t.Errorf("peer.service was rewritten to %q", tags["peer.service"])
 	}
 }
 

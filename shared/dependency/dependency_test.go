@@ -326,6 +326,7 @@ func TestHTTPClientIsNotDatabaseFromPeerCIDR(t *testing.T) {
 		"http.request.method": "GET",
 		"url.path":            "/apis/apps/v1/namespaces/default/deployments/x",
 		"server.address":      "crtnet-ext-k8s-ha.cloudraft.dc",
+		"db.name":             "orders",
 	}
 	if _, ok := c.Classify(tags, "GET", "CLIENT"); ok {
 		t.Fatal("HTTP CLIENT must not be classified as a database even when db.name is present from pod hints")
@@ -493,5 +494,73 @@ func TestMessageBusIsNotAssumedRabbit(t *testing.T) {
 	}
 	if got.System == "rabbitmq" {
 		t.Error("generic message_bus was resolved to rabbitmq")
+	}
+}
+
+// peer.service is a logical name. Product tokens still classify; generic
+// host-scoped tokens and unrelated service names must not.
+func TestPeerServiceClassifiesProductNotHost(t *testing.T) {
+	c := testClassifier(t)
+
+	got, ok := c.Classify(map[string]string{"peer.service": "postgres"}, "query", "CLIENT")
+	if !ok || got.System != "postgresql" || got.Evidence != "peer.service" {
+		t.Errorf("peer.service=postgres -> %+v, want postgresql/peer.service", got)
+	}
+
+	if got, ok := c.Classify(map[string]string{"peer.service": "orders-db"}, "query", "CLIENT"); ok {
+		t.Errorf("peer.service=orders-db should not use host-scoped db token, got %+v", got)
+	}
+
+	if got, ok := c.Classify(map[string]string{"peer.service": "user-api"}, "GET", "CLIENT"); ok {
+		t.Errorf("peer.service=user-api should not classify, got %+v", got)
+	}
+
+	// An HTTP call must not become a database just because peer.service names one.
+	httpTags := map[string]string{
+		"http.request.method": "GET",
+		"url.path":            "/status",
+		"peer.service":        "postgres",
+	}
+	if got, ok := c.Classify(httpTags, "GET /status", "CLIENT"); ok && got.Kind == KindDatabase {
+		t.Errorf("HTTP + peer.service=postgres classified as database: %+v", got)
+	}
+}
+
+func TestRPCSystemClassifies(t *testing.T) {
+	c := testClassifier(t)
+	got, ok := c.Classify(map[string]string{"rpc.system": "grpc", "rpc.service": "users.User"}, "users.User/Get", "CLIENT")
+	if !ok || got.Kind != KindRPC || got.System != "grpc" || got.Evidence != "rpc.system" {
+		t.Errorf("rpc.system=grpc -> %+v, want grpc/rpc", got)
+	}
+
+	got, ok = c.Classify(map[string]string{"rpc.system.name": "apache_dubbo"}, "Foo/Bar", "CLIENT")
+	if !ok || got.Kind != KindRPC || got.System != "apache_dubbo" {
+		t.Errorf("rpc.system.name -> %+v, want apache_dubbo/rpc", got)
+	}
+}
+
+func TestDBNameWithoutHTTPIsDatabase(t *testing.T) {
+	c := testClassifier(t)
+	got, ok := c.Classify(map[string]string{"db.name": "orders"}, "query", "CLIENT")
+	if !ok || got.Kind != KindDatabase || got.Evidence != "db.name" {
+		t.Errorf("db.name only -> %+v, want database/db.name", got)
+	}
+
+	got, ok = c.Classify(map[string]string{"db.namespace": "inventory"}, "query", "CLIENT")
+	if !ok || got.Kind != KindDatabase || got.Evidence != "db.name" {
+		t.Errorf("db.namespace only -> %+v, want database/db.name", got)
+	}
+}
+
+func TestStableSystemNameAliases(t *testing.T) {
+	c := testClassifier(t)
+	got, ok := c.Classify(map[string]string{"db.system.name": "mysql"}, "query", "CLIENT")
+	if !ok || got.System != "mysql" || got.Evidence != "db.system" {
+		t.Errorf("db.system.name -> %+v, want mysql", got)
+	}
+
+	got, ok = c.Classify(map[string]string{"messaging.system.name": "kafka"}, "send", "PRODUCER")
+	if !ok || got.System != "kafka" || got.Kind != KindMessaging {
+		t.Errorf("messaging.system.name -> %+v, want kafka/messaging", got)
 	}
 }

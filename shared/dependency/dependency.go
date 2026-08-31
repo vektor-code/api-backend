@@ -46,6 +46,7 @@ const (
 	KindSecrets       Kind = "secrets"
 	KindDiscovery     Kind = "discovery"
 	KindObservability Kind = "observability"
+	KindRPC           Kind = "rpc"
 )
 
 // Confidence levels, ordered by how much the evidence is worth.
@@ -301,10 +302,14 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 		tags = map[string]string{}
 	}
 
+	// peer.service is a logical name (Tempo/Elastic use it to *name* a virtual
+	// node), not a hostname. Reading it here made "postgres" classify via host
+	// rules and also poisoned server.address through semconv aliases.
 	host := strings.ToLower(firstNonEmpty(tags,
-		"server.address", "net.peer.name", "network.peer.address", "net.peer.ip", "peer.service"))
+		"server.address", "net.peer.name", "network.peer.address", "net.peer.ip"))
 	port := firstNonEmpty(tags, "server.port", "net.peer.port", "network.peer.port", "peer.port")
 	host, port = splitHostPort(host, port)
+	peerService := strings.ToLower(strings.TrimSpace(tags["peer.service"]))
 
 	httpNotDB := hasHTTPSignal(tags) && !hasDBSignal(tags)
 
@@ -317,11 +322,11 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 	messagingFirst := isMessagingSpan(spanKind)
 
 	if !messagingFirst {
-		if sys := strings.ToLower(strings.TrimSpace(tags["db.system"])); sys != "" && sys != "unknown" {
+		if sys := canonicalSystem(tags, "db.system", "db.system.name"); sys != "" {
 			return c.explicit(sys, KindDatabase, "db.system"), true
 		}
 	}
-	if sys := strings.ToLower(strings.TrimSpace(tags["messaging.system"])); sys != "" && sys != "unknown" {
+	if sys := canonicalSystem(tags, "messaging.system", "messaging.system.name"); sys != "" {
 		// Force the messaging kind rather than looking the id up: Redis is
 		// registered as a cache, but Redis carrying a queue is messaging.
 		return Result{
@@ -330,9 +335,18 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 		}, true
 	}
 	if messagingFirst {
-		if sys := strings.ToLower(strings.TrimSpace(tags["db.system"])); sys != "" && sys != "unknown" {
+		if sys := canonicalSystem(tags, "db.system", "db.system.name"); sys != "" {
 			return c.explicit(sys, KindDatabase, "db.system"), true
 		}
+	}
+
+	// RPC is the same class of explicit signal Elastic maps to span.subtype.
+	// It must not fall through to host/name guesses, and it is not a database.
+	if sys := canonicalSystem(tags, "rpc.system", "rpc.system.name"); sys != "" {
+		return Result{
+			System: sys, Kind: KindRPC,
+			Evidence: "rpc.system", Confidence: ConfidenceExplicit,
+		}, true
 	}
 
 	// Tier 2/3 — operator-declared hosts, CIDRs and well-known ports.
@@ -354,6 +368,14 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 
 	if host != "" {
 		if r, ok := c.matchName(host, true, weakDBAllowed, "host", ConfidenceHost); ok {
+			return r, true
+		}
+	}
+	// Product tokens in peer.service are trustworthy ("postgres", "redis").
+	// Generic host-scoped tokens such as "db" are not: "orders-db" is a
+	// logical name, not evidence of a database engine.
+	if peerService != "" {
+		if r, ok := c.matchName(peerService, false, weakDBAllowed, "peer.service", ConfidenceHost); ok {
 			return r, true
 		}
 	}
@@ -384,6 +406,17 @@ func (c *Classifier) Classify(tags map[string]string, spanName, spanKind string)
 			System:     "database",
 			Kind:       KindDatabase,
 			Evidence:   "db.attributes",
+			Confidence: ConfidenceAttribute,
+		}, true
+	}
+	// Tempo treats db.name / db.namespace as enough to call a CLIENT span a
+	// database. We only do that when there is no HTTP signal: pod DATABASE_*
+	// hints used to stamp db.name onto k8s API GETs and turn them into queries.
+	if !hasHTTPSignal(tags) && hasDBName(tags) {
+		return Result{
+			System:     "database",
+			Kind:       KindDatabase,
+			Evidence:   "db.name",
 			Confidence: ConfidenceAttribute,
 		}, true
 	}
@@ -512,6 +545,19 @@ func hasDBSignal(tags map[string]string) bool {
 		}
 	}
 	return false
+}
+
+func hasDBName(tags map[string]string) bool {
+	return firstNonEmpty(tags, "db.name", "db.namespace") != ""
+}
+
+// canonicalSystem returns the first non-empty, non-"unknown" system id.
+func canonicalSystem(tags map[string]string, keys ...string) string {
+	sys := strings.ToLower(strings.TrimSpace(firstNonEmpty(tags, keys...)))
+	if sys == "" || sys == "unknown" {
+		return ""
+	}
+	return sys
 }
 
 // isMessagingSpan reports whether the span kind is a queue operation.

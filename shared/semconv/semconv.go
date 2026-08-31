@@ -47,10 +47,11 @@ var aliasRules = []aliasRule{
 	{canonical: "http.response.body", sources: []string{"response.body", "http.response_body"}, backfill: true},
 
 	// --- network peer ---
-	// peer.service is a logical service name rather than a host, so it is read
-	// as a last-resort source but never written back into.
+	// peer.service is a logical service name (what Tempo uses to *name* a
+	// virtual node), not a hostname. It must not seed server.address or every
+	// later host/port matcher will treat "postgres" as a DNS name.
 	{canonical: "server.address", sources: []string{
-		"net.peer.name", "network.peer.address", "net.peer.ip", "http.host", "peer.service",
+		"net.peer.name", "network.peer.address", "net.peer.ip", "http.host",
 	}},
 	{canonical: "net.peer.name", sources: []string{"server.address"}},
 	{canonical: "server.port", sources: []string{"net.peer.port", "network.peer.port", "peer.port"}},
