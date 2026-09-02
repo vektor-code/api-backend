@@ -178,6 +178,13 @@ func chEscape(v string) string {
 	return v
 }
 
+// chSpanErrorSQL matches OTel ERROR spans and HTTP ≥ 500 responses even when
+// status_code is UNSET (common with auto-instrumentation). Does not treat 4xx
+// alone as errors so Explorer is not flooded by client 404 noise.
+func chSpanErrorSQL() string {
+	return `(status_code = 'ERROR' OR toInt64OrZero(tags['http.response.status_code']) >= 500 OR toInt64OrZero(tags['http.status_code']) >= 500)`
+}
+
 func chTraceIDPredicate(traceID string) string {
 	traceID = strings.TrimSpace(traceID)
 	if len(traceID) == 32 && isHexString(traceID) {
@@ -331,6 +338,7 @@ func chRowToSpan(row map[string]any) *models.Span {
 			span.Events = events
 		}
 	}
+	promoteExceptionFromEvents(span)
 	if raw := span.Attributes["otel.span.links"]; raw != "" {
 		var links []models.SpanLink
 		if err := json.Unmarshal([]byte(raw), &links); err == nil {
@@ -371,6 +379,66 @@ func chRowToSpan(row map[string]any) *models.Span {
 	return span
 }
 
+// promoteExceptionFromEvents lifts exception event fields onto the span so
+// drawers and analyzers see a message even when status_message was empty
+// (common with Python OTel auto-instrumentation).
+func promoteExceptionFromEvents(span *models.Span) {
+	if span == nil || len(span.Events) == 0 {
+		return
+	}
+	var exc *models.SpanEvent
+	for i := range span.Events {
+		name := strings.ToLower(strings.TrimSpace(span.Events[i].Name))
+		if name == "exception" || name == "error" {
+			exc = &span.Events[i]
+			break
+		}
+	}
+	if exc == nil || exc.Attributes == nil {
+		return
+	}
+	if span.Attributes == nil {
+		span.Attributes = map[string]string{}
+	}
+	for _, k := range []string{"exception.type", "exception.message", "exception.stacktrace", "exception.escaped"} {
+		if v := strings.TrimSpace(exc.Attributes[k]); v != "" && span.Attributes[k] == "" {
+			span.Attributes[k] = v
+		}
+	}
+	if msg := strings.TrimSpace(exc.Attributes["exception.message"]); msg == "" {
+		msg = strings.TrimSpace(exc.Attributes["message"])
+		if msg != "" && span.Attributes["exception.message"] == "" {
+			span.Attributes["exception.message"] = msg
+		}
+	}
+	if strings.TrimSpace(span.Error) == "" {
+		if msg := strings.TrimSpace(span.Attributes["exception.message"]); msg != "" {
+			span.Error = redactSecretFragments(msg)
+		}
+	}
+	if span.Status != models.SpanStatusError {
+		span.Status = models.SpanStatusError
+	}
+}
+
+// redactSecretFragments strips common credential patterns from display/error text.
+func redactSecretFragments(s string) string {
+	lower := strings.ToLower(s)
+	if !strings.Contains(lower, "bearer ") && !strings.Contains(lower, "api-key") &&
+		!strings.Contains(lower, "api_key") && !strings.Contains(lower, "authorization:") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "bearer ") || strings.Contains(l, "api-key") ||
+			strings.Contains(l, "api_key") || strings.Contains(l, "authorization:") {
+			lines[i] = "[redacted]"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 const chSpanColumns = "timestamp, trace_id, span_id, parent_span_id, service_name, operation_name, duration_ns, status_code, status_message, tags, namespace, cluster, kind, pod_name, node_name, events, transaction_name, dep_system, dep_kind, sample_weight"
 
 // runClickHouseRefresh replaces the MinIO gossip loop in ClickHouse mode:
@@ -401,7 +469,7 @@ func (s *Store) refreshFromClickHouse() {
 		namespace, service_name,
 		any(cluster) AS cluster,
 		countIf(%[1]s) AS request_count,
-		countIf(status_code = 'ERROR' AND (%[1]s)) AS error_count,
+		countIf((` + chSpanErrorSQL() + `) AND (%[1]s)) AS error_count,
 		quantileIf(0.5)(duration_ns, %[1]s) / 1e6 AS p50,
 		quantileIf(0.95)(duration_ns, %[1]s) / 1e6 AS p95,
 		quantileIf(0.99)(duration_ns, %[1]s) / 1e6 AS p99,
@@ -558,9 +626,9 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 	}
 	if q.HasError != nil {
 		if *q.HasError {
-			having = append(having, "countIf(status_code = 'ERROR') > 0")
+			having = append(having, "countIf("+chSpanErrorSQL()+") > 0")
 		} else {
-			having = append(having, "countIf(status_code = 'ERROR') = 0")
+			having = append(having, "countIf("+chSpanErrorSQL()+") = 0")
 		}
 	}
 	if q.Operation != "" {
@@ -688,9 +756,9 @@ func (s *Store) chEndpointFilters(q *models.SearchQuery) (where []string, having
 	}
 	if q.HasError != nil {
 		if *q.HasError {
-			having = append(having, "countIf(status_code = 'ERROR') > 0")
+			having = append(having, "countIf("+chSpanErrorSQL()+") > 0")
 		} else {
-			having = append(having, "countIf(status_code = 'ERROR') = 0")
+			having = append(having, "countIf("+chSpanErrorSQL()+") = 0")
 		}
 	}
 	if q.Operation != "" {
@@ -778,7 +846,7 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 		%s AS root_namespace,
 		%s AS root_op,
 		(max(toUnixTimestamp64Milli(timestamp) + intDiv(duration_ns, 1000000)) - min(toUnixTimestamp64Milli(timestamp))) AS dur_ms,
-		countIf(status_code = 'ERROR') > 0 AS has_error,
+		countIf(`+chSpanErrorSQL()+`) > 0 AS has_error,
 		maxIf(sample_weight, %s) AS weight
 	FROM kubetrace.spans
 	WHERE %s

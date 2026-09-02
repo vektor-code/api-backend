@@ -138,3 +138,53 @@ func TestChQueryBoundsKeepsForeverRetentionBoundedByDefault(t *testing.T) {
 		t.Fatalf("expected bounded default start %s, got %s", want, start)
 	}
 }
+
+func TestChSpanErrorSQLIncludesHTTP500(t *testing.T) {
+	sql := chSpanErrorSQL()
+	if !strings.Contains(sql, "status_code = 'ERROR'") {
+		t.Fatalf("expected ERROR status match: %s", sql)
+	}
+	if !strings.Contains(sql, ">= 500") {
+		t.Fatalf("expected HTTP >= 500 match: %s", sql)
+	}
+	if strings.Contains(sql, ">= 400") {
+		t.Fatalf("must not treat all 4xx as errors: %s", sql)
+	}
+}
+
+func TestPromoteExceptionFromEvents(t *testing.T) {
+	span := &models.Span{
+		Status: models.SpanStatusUnset,
+		Events: []models.SpanEvent{{
+			Name: "exception",
+			Attributes: map[string]string{
+				"exception.message": "1 validation error for MDM\nmdm_opening_status\n  Input should be a valid string [type=string_type, input_value=None]",
+				"exception.stacktrace": "Traceback (most recent call last):\n  File ...",
+			},
+		}},
+	}
+	promoteExceptionFromEvents(span)
+	if span.Error == "" {
+		t.Fatal("expected exception.message promoted to span.Error")
+	}
+	if span.Attributes["exception.message"] == "" {
+		t.Fatal("expected exception.message attribute")
+	}
+	if span.Attributes["exception.stacktrace"] == "" {
+		t.Fatal("expected exception.stacktrace attribute")
+	}
+	if span.Status != models.SpanStatusError {
+		t.Fatalf("expected ERROR status, got %s", span.Status)
+	}
+}
+
+func TestRedactSecretFragments(t *testing.T) {
+	in := "ok\nauthorization: Bearer secret-token\napi-key: abc\nstill ok"
+	out := redactSecretFragments(in)
+	if strings.Contains(out, "Bearer secret-token") || strings.Contains(out, "api-key: abc") {
+		t.Fatalf("expected secrets redacted, got %q", out)
+	}
+	if !strings.Contains(out, "still ok") {
+		t.Fatalf("expected non-secret lines kept, got %q", out)
+	}
+}

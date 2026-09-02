@@ -689,3 +689,33 @@ func TestTomcatLibraryIsHTTPSpan(t *testing.T) {
 	d := mustAnalyze(t, makeTrace("t-tomcat-500", server), Options{})
 	requireClass(t, d, ClassificationApplicationError)
 }
+
+func TestHTTP500FoldsExceptionMessageIntoSummary(t *testing.T) {
+	server := tspan("s1", "", models.SpanKindServer, "GET", "api-backend", 0, 12*time.Millisecond, models.SpanStatusUnset, map[string]string{
+		"http.request.method":       "GET",
+		"url.path":                  "/mdm/accounts/status",
+		"http.response.status_code": "500",
+		"otel.library.name":         "opentelemetry.instrumentation.fastapi",
+	})
+	server.Events = []models.SpanEvent{{
+		Name: "exception",
+		Attributes: map[string]string{
+			"exception.message": "1 validation error for MDMResponse\nmdm_opening_status\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]",
+		},
+	}}
+	d := mustAnalyze(t, makeTrace("t-pydantic-500", server), Options{})
+	requireClass(t, d, ClassificationApplicationError)
+	if !strings.Contains(d.Summary, "validation error") {
+		t.Fatalf("expected exception folded into summary, got %q", d.Summary)
+	}
+	found := false
+	for _, ev := range d.Evidence {
+		if ev.Code == "exception_message" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected exception_message evidence")
+	}
+}

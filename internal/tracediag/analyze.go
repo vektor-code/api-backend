@@ -641,6 +641,19 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 		}
 		evidence = append(evidence, Evidence{Code: "reasonable_duration", Message: fmt.Sprintf("Duration %s is internally consistent with an HTTP response.", formatDuration(sp.DurationMs)), SpanID: sp.SpanID, Score: 10})
 
+		excMsg := ""
+		if status >= 500 {
+			excMsg = exceptionMessage(sp)
+			if excMsg != "" {
+				evidence = append(evidence, Evidence{
+					Code:    "exception_message",
+					Message: truncateRunes(excMsg, 240),
+					SpanID:  sp.SpanID,
+					Score:   20,
+				})
+			}
+		}
+
 		if down != nil {
 			dst, _ := httpStatus(down)
 			dname := down.ServiceName
@@ -654,11 +667,15 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 				Score:   15,
 			})
 			ids = append(ids, down.SpanID)
+			downSummary := fmt.Sprintf("Application request failed because downstream service returned HTTP %d.", dst)
+			if downExc := exceptionMessage(down); downExc != "" {
+				downSummary = fmt.Sprintf("Application request failed because downstream service returned HTTP %d: %s", dst, truncateRunes(downExc, 180))
+			}
 			out = append(out, finding{
 				classification: ClassificationDownstreamError,
 				score:          85,
 				title:          title,
-				summary:        fmt.Sprintf("Application request failed because downstream service returned HTTP %d.", dst),
+				summary:        downSummary,
 				evidence:       evidence,
 				causes: []string{
 					fmt.Sprintf("A downstream service returned HTTP %d; this service propagated the failure.", dst),
@@ -691,6 +708,16 @@ func ruleHTTPOutcome(tree spanTree) []finding {
 			rules = []string{"http_4xx"}
 			causes = []string{fmt.Sprintf("The server rejected the request with HTTP %d.", status)}
 			summary = fmt.Sprintf("The target service returned HTTP %d for %s.", status, op)
+		}
+
+		if status >= 500 && excMsg != "" {
+			clipped := truncateRunes(excMsg, 180)
+			if sp.Kind == models.SpanKindClient {
+				summary = fmt.Sprintf("%s received HTTP %d from a remote dependency for %s: %s", sp.ServiceName, status, op, clipped)
+			} else {
+				summary = fmt.Sprintf("The target service returned HTTP %d for %s: %s", status, op, clipped)
+			}
+			causes = append([]string{clipped}, causes...)
 		}
 
 		out = append(out, finding{

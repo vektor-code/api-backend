@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -421,7 +422,7 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 		if maxEnd.IsZero() || sp.EndTime.After(maxEnd) {
 			maxEnd = sp.EndTime
 		}
-		if sp.Status == models.SpanStatusError {
+		if sp.Status == models.SpanStatusError || spanHasHTTPServerFailure(sp) {
 			hasError = true
 		}
 		if sp.Cluster != "" {
@@ -456,6 +457,26 @@ func buildTrace(traceID string, spans []*models.Span) *models.Trace {
 	}
 
 	return trace
+}
+
+func spanHasHTTPServerFailure(sp *models.Span) bool {
+	if sp == nil || sp.Attributes == nil {
+		return false
+	}
+	for _, key := range []string{"http.response.status_code", "http.status_code", "http.status"} {
+		raw := strings.TrimSpace(sp.Attributes[key])
+		if raw == "" {
+			continue
+		}
+		code, err := strconv.Atoi(raw)
+		if err != nil {
+			continue
+		}
+		if code >= 500 && code <= 599 {
+			return true
+		}
+	}
+	return false
 }
 
 // GetRecentSpans returns all spans from in-memory traces, optionally filtered by namespace

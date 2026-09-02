@@ -185,6 +185,46 @@ func errorText(sp *models.Span) string {
 	return strings.ToLower(strings.Join(parts, " "))
 }
 
+// exceptionMessage returns the first useful exception.message from attributes or events.
+func exceptionMessage(sp *models.Span) string {
+	if sp == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(attr(sp, "exception.message")); v != "" {
+		return v
+	}
+	for _, ev := range sp.Events {
+		name := strings.ToLower(strings.TrimSpace(ev.Name))
+		if name != "exception" && name != "error" {
+			continue
+		}
+		if ev.Attributes == nil {
+			continue
+		}
+		if v := strings.TrimSpace(ev.Attributes["exception.message"]); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(ev.Attributes["message"]); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(sp.Error); v != "" {
+		return v
+	}
+	return ""
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 || s == "" {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 func httpStatusName(code int) string {
 	switch code {
 	case 400:
