@@ -226,3 +226,18 @@ type DatabaseQueryMetric struct {
 
 	RecentErrors []string `json:"recentErrors"`
 }
+
+// ErrorGroup is a recurring failure shape: same exception type / query /
+// transaction, counted across traces so the issue list is not one row per event.
+type ErrorGroup struct {
+	Fingerprint      string    `json:"fingerprint"`
+	Namespace        string    `json:"namespace"`
+	ServiceName      string    `json:"serviceName"`
+	TransactionName  string    `json:"transactionName,omitempty"`
+	ExceptionType    string    `json:"exceptionType,omitempty"`
+	ExceptionMessage string    `json:"exceptionMessage,omitempty"`
+	DBFingerprint    string    `json:"dbFingerprint,omitempty"`
+	ExampleTraceID   string    `json:"exampleTraceId,omitempty"`
+	Count            int64     `json:"count"`
+	LastSeen         time.Time `json:"lastSeen"`
+}

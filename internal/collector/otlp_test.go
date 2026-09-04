@@ -4,9 +4,9 @@ import "testing"
 
 func TestResolveServiceNamePrefersWorkloadOverUnknown(t *testing.T) {
 	got := resolveServiceName(map[string]string{
-		"service.name":         "unknown_service:java",
-		"k8s.deployment.name":  "api-backend",
-		"k8s.container.name":   "app",
+		"service.name":        "unknown_service:java",
+		"k8s.deployment.name": "api-backend",
+		"k8s.container.name":  "app",
 	})
 	if got != "api-backend" {
 		t.Fatalf("got %q, want api-backend", got)

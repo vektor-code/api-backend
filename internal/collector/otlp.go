@@ -357,7 +357,8 @@ func (r *Receiver) applySampling(span *models.Span, isError bool) bool {
 	if r.sampler == nil {
 		return true
 	}
-	decision := r.sampler.Sample(span.TraceID, isError)
+	forceKeep := isError || span.DurationMs >= slowTraceKeepMs()
+	decision := r.sampler.Sample(span.TraceID, forceKeep)
 	if !decision.Keep {
 		return false
 	}

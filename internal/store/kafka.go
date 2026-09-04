@@ -67,7 +67,7 @@ func newSpanProducer(brokers, topic string) *spanProducer {
 		writer: &kafka.Writer{
 			Addr:                   kafka.TCP(addrs...),
 			Topic:                  topic,
-			Balancer:               &kafka.LeastBytes{},
+			Balancer:               &kafka.Hash{},
 			BatchTimeout:           200 * time.Millisecond,
 			RequiredAcks:           requiredAcks,
 			AllowAutoTopicCreation: allowAutoTopic,
@@ -157,21 +157,20 @@ func (p *spanProducer) run() {
 }
 
 func (p *spanProducer) flush(batch []*models.Span) {
-	data, err := json.Marshal(batch)
-	if err != nil {
-		log.Printf("[kafka] marshal %d spans: %v", len(batch), err)
+	messages := kafkaMessagesByTrace(batch)
+	if len(messages) == 0 {
 		return
 	}
 
 	for attempt := 1; ; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := p.writer.WriteMessages(ctx, kafka.Message{Value: data})
+		err := p.writer.WriteMessages(ctx, messages...)
 		cancel()
 		if err == nil {
 			return
 		}
 
-		log.Printf("[kafka] write %d spans failed attempt=%d: %v", len(batch), attempt, err)
+		log.Printf("[kafka] write %d spans in %d messages failed attempt=%d: %v", len(batch), len(messages), attempt, err)
 		if attempt > p.writeRetries {
 			log.Printf("[kafka] dropping %d spans after %d failed kafka writes", len(batch), attempt)
 			return
@@ -180,6 +179,37 @@ func (p *spanProducer) flush(batch []*models.Span) {
 			return
 		}
 	}
+}
+
+// kafkaMessagesByTrace publishes one Kafka record per trace ID so the
+// partition key colocates every span of a trace. Tail sampling and
+// ordered ingest depend on that.
+func kafkaMessagesByTrace(batch []*models.Span) []kafka.Message {
+	grouped := make(map[string][]*models.Span, len(batch))
+	order := make([]string, 0, len(batch))
+	for _, sp := range batch {
+		if sp == nil {
+			continue
+		}
+		id := sp.TraceID
+		if _, ok := grouped[id]; !ok {
+			order = append(order, id)
+		}
+		grouped[id] = append(grouped[id], sp)
+	}
+	messages := make([]kafka.Message, 0, len(order))
+	for _, id := range order {
+		data, err := json.Marshal(grouped[id])
+		if err != nil {
+			log.Printf("[kafka] marshal %d spans for trace %s: %v", len(grouped[id]), id, err)
+			continue
+		}
+		messages = append(messages, kafka.Message{
+			Key:   []byte(id),
+			Value: data,
+		})
+	}
+	return messages
 }
 
 func (p *spanProducer) Close() error {

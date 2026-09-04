@@ -81,6 +81,17 @@ func TestAdaptiveSampler_TraceDecisionSticksAcrossRatioChange(t *testing.T) {
 	}
 }
 
+func TestSlowTraceKeepMsDefault(t *testing.T) {
+	t.Setenv("APM_SLOW_TRACE_MS", "")
+	if got := slowTraceKeepMs(); got != 2000 {
+		t.Fatalf("default = %v, want 2000", got)
+	}
+	t.Setenv("APM_SLOW_TRACE_MS", "5000")
+	if got := slowTraceKeepMs(); got != 5000 {
+		t.Fatalf("override = %v, want 5000", got)
+	}
+}
+
 func TestAdaptiveSampler_ErrorOverridesDropPin(t *testing.T) {
 	sampler := NewAdaptiveSampler(100, time.Hour)
 	defer sampler.Stop()

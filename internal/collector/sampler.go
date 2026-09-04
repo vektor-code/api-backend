@@ -3,6 +3,9 @@ package collector
 import (
 	"hash/fnv"
 	"log"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,12 +83,15 @@ func (s *AdaptiveSampler) ShouldSample(traceID string, isError bool) bool {
 }
 
 // Sample makes the decision and reports the weight the surviving span carries.
-func (s *AdaptiveSampler) Sample(traceID string, isError bool) SampleDecision {
+// forceKeep is true for errors and slow spans so a trace that already failed
+// or blew its latency budget cannot be dropped mid-tree.
+func (s *AdaptiveSampler) Sample(traceID string, forceKeep bool) SampleDecision {
 	atomic.AddInt64(&s.spansCount, 1)
 
-	// Errors always keep the whole trace. Giving them the probabilistic
-	// weight would inflate error counts by the sampling factor.
-	if isError {
+	// Forced keeps (errors, slow traces) always keep the whole trace. Giving
+	// them the probabilistic weight would inflate those counts by the sampling
+	// factor.
+	if forceKeep {
 		d := keptExactly()
 		s.pin(traceID, d)
 		atomic.AddInt64(&s.spansSampled, 1)
@@ -151,6 +157,18 @@ func (s *AdaptiveSampler) pinned(traceID string) (SampleDecision, bool) {
 
 func keptExactly() SampleDecision {
 	return SampleDecision{Keep: true, Probability: 1, AdjustedCount: 1}
+}
+
+func slowTraceKeepMs() float64 {
+	v := strings.TrimSpace(os.Getenv("APM_SLOW_TRACE_MS"))
+	if v == "" {
+		return 2000
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f <= 0 {
+		return 2000
+	}
+	return f
 }
 
 // GetCurrentRatio returns the active sample rate as a percentage (0.0 to 100.0)

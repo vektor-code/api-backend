@@ -59,6 +59,16 @@ func (s *Store) purgeClickHouseSpans(ctx context.Context) (int64, error) {
 	if err := s.chExec(ctx, "TRUNCATE TABLE IF EXISTS kubetrace.spans"); err != nil {
 		return 0, fmt.Errorf("truncate spans: %w", err)
 	}
+	for _, table := range []string{
+		"kubetrace.span_metrics",
+		"kubetrace.service_graph",
+		"kubetrace.error_groups",
+		"kubetrace.span_events",
+	} {
+		if err := s.chExec(ctx, "TRUNCATE TABLE IF EXISTS "+table); err != nil {
+			log.Printf("[purge] truncate %s: %v", table, err)
+		}
+	}
 	return n, nil
 }
 
@@ -105,6 +115,10 @@ func (s *Store) clearTraceCaches() {
 	s.tracesMu.Lock()
 	s.recentTraces = make(map[string]*models.Trace)
 	s.tracesMu.Unlock()
+
+	s.tracePodsMu.Lock()
+	s.tracePods = nil
+	s.tracePodsMu.Unlock()
 
 	s.localMu.Lock()
 	s.localStats = make(map[string]*models.ServiceStats)

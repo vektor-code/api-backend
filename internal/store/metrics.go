@@ -79,6 +79,26 @@ func (s *Store) rebuildPrecomputedStats() {
 // This provides pod discovery for namespaces on remote clusters that send
 // OTEL traces but are not reachable via the local K8s API watcher.
 func (s *Store) GetTracePodsByNamespace(namespace string) []TracePodInfo {
+	if s.chMode {
+		s.tracePodsMu.RLock()
+		cached := s.tracePods
+		s.tracePodsMu.RUnlock()
+		if len(cached) > 0 {
+			if namespace == "" {
+				out := make([]TracePodInfo, len(cached))
+				copy(out, cached)
+				return out
+			}
+			out := make([]TracePodInfo, 0, len(cached))
+			for _, p := range cached {
+				if p.Namespace == namespace {
+					out = append(out, p)
+				}
+			}
+			return out
+		}
+	}
+
 	s.tracesMu.RLock()
 	defer s.tracesMu.RUnlock()
 

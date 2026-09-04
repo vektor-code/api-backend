@@ -60,6 +60,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/metrics/infrastructure", h.GetInfrastructureMetrics)
 	api.Get("/services", h.GetServices)
 	api.Get("/servicemap", h.GetServiceMap)
+	api.Get("/issues", h.GetIssues)
 	api.Get("/pods", h.GetPods)
 
 	// Admin & cluster routes

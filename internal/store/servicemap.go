@@ -18,8 +18,15 @@ func (s *Store) GetServiceMap(namespace string) (*models.ServiceMapData, error) 
 		return cached, nil
 	}
 
-	// Cache miss — build now
-	result := s.buildServiceMap(namespace)
+	var result *models.ServiceMapData
+	if s.chMode {
+		if built, err := s.buildServiceMapFromGraph(namespace); err == nil && built != nil && (len(built.Nodes) > 0 || len(built.Edges) > 0) {
+			result = built
+		}
+	}
+	if result == nil {
+		result = s.buildServiceMap(namespace)
+	}
 
 	s.serviceMapMu.Lock()
 	s.serviceMapCache[namespace] = result

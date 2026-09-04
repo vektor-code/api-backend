@@ -63,6 +63,9 @@ func (s *Store) GetTimeseries(namespace string, allowedNs []string, windowMinute
 	}
 
 	if s.chMode {
+		if data, err := s.chTimeseriesFromMetrics(result, bucketIdx, namespace, allowedNs, from, step); err == nil && data != nil {
+			return data, nil
+		}
 		return s.chTimeseries(result, bucketIdx, namespace, allowedNs, from, step)
 	}
 	return s.memTimeseries(result, bucketIdx, namespace, allowedNs, from, step)
@@ -122,7 +125,11 @@ func (s *Store) chTimeseries(result *TimeseriesData, bucketIdx map[int64]int, na
 	if err != nil {
 		return result, nil // heatmap is optional; charts already have data
 	}
+	fillTimeseriesHeatmap(result, bucketIdx, svcRows)
+	return result, nil
+}
 
+func fillTimeseriesHeatmap(result *TimeseriesData, bucketIdx map[int64]int, svcRows []map[string]any) {
 	type svcAgg struct {
 		ns          string
 		spans       []int64
@@ -154,7 +161,6 @@ func (s *Store) chTimeseries(result *TimeseriesData, bucketIdx map[int64]int, na
 	for name, agg := range svcMap {
 		all = append(all, ranked{name, agg})
 	}
-	// Services with errors first, then by traffic volume.
 	sort.Slice(all, func(i, j int) bool {
 		if (all[i].agg.totalErrors > 0) != (all[j].agg.totalErrors > 0) {
 			return all[i].agg.totalErrors > 0
@@ -175,7 +181,6 @@ func (s *Store) chTimeseries(result *TimeseriesData, bucketIdx map[int64]int, na
 			Spans:     r.agg.spans,
 		})
 	}
-	return result, nil
 }
 
 // memTimeseries computes the same aggregates from the in-memory recent traces

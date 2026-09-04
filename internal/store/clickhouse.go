@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -161,14 +160,38 @@ func (s *Store) ApplyClickHouseTTL(retentionHours int) error {
 		if err := s.chExec(ctx, "ALTER TABLE kubetrace.spans REMOVE TTL"); err != nil {
 			return fmt.Errorf("remove clickhouse ttl: %w", err)
 		}
+		s.applyDerivedClickHouseTTL(ctx, 0)
 		log.Printf("[clickhouse] retention TTL removed (keep forever, no cold tier)")
 		return nil
 	}
 	if err := s.chExec(ctx, "ALTER TABLE kubetrace.spans MODIFY TTL "+ttl); err != nil {
 		return fmt.Errorf("apply clickhouse ttl: %w", err)
 	}
+	s.applyDerivedClickHouseTTL(ctx, retentionHours)
 	log.Printf("[clickhouse] retention reconciled: hot=%dh cold=%v retention=%dh", s.chHotHours, hasCold, retentionHours)
 	return nil
+}
+
+func (s *Store) applyDerivedClickHouseTTL(ctx context.Context, retentionHours int) {
+	tables := []struct {
+		name string
+		col  string
+	}{
+		{"kubetrace.span_metrics", "bucket"},
+		{"kubetrace.service_graph", "bucket"},
+		{"kubetrace.span_events", "timestamp"},
+	}
+	for _, t := range tables {
+		var q string
+		if retentionHours <= 0 {
+			q = "ALTER TABLE " + t.name + " REMOVE TTL"
+		} else {
+			q = fmt.Sprintf("ALTER TABLE %s MODIFY TTL toDateTime(%s) + toIntervalHour(%d) DELETE", t.name, t.col, retentionHours)
+		}
+		if err := s.chExec(ctx, q); err != nil && !strings.Contains(strings.ToLower(err.Error()), "cannot remove") {
+			log.Printf("[clickhouse] derived TTL %s: %v", t.name, err)
+		}
+	}
 }
 
 // chEscape escapes a string literal for safe inlining into a ClickHouse query.
@@ -463,108 +486,28 @@ func (s *Store) refreshFromClickHouse() {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	// 1. Service statistics with real percentiles.
-	eligible := httproute.CHRequestIdentityEligible("kind", "tags", "operation_name")
-	statsQuery := fmt.Sprintf(`SELECT
-		namespace, service_name,
-		any(cluster) AS cluster,
-		countIf(%[1]s) AS request_count,
-		countIf((` + chSpanErrorSQL() + `) AND (%[1]s)) AS error_count,
-		quantileIf(0.5)(duration_ns, %[1]s) / 1e6 AS p50,
-		quantileIf(0.95)(duration_ns, %[1]s) / 1e6 AS p95,
-		quantileIf(0.99)(duration_ns, %[1]s) / 1e6 AS p99,
-		max(timestamp) AS last_seen,
-		if(
-			anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] NOT IN ('', 'unknown', 'auto')) != '',
-			anyIf(tags['telemetry.sdk.language'], tags['telemetry.sdk.language'] NOT IN ('', 'unknown', 'auto')),
-			anyIf(tags['process.runtime.name'], tags['process.runtime.name'] NOT IN ('', 'unknown', 'auto'))
-		) AS sdk_lang
-	FROM kubetrace.spans
-	WHERE timestamp > now64(6) - INTERVAL %[2]d SECOND
-	GROUP BY namespace, service_name`, eligible, int(chStatsWindow.Seconds()))
-
-	statsRows, err := s.chQuery(ctx, statsQuery)
+	newStats, fromMetrics, err := s.chLoadServiceStats(ctx)
 	if err != nil {
 		log.Printf("[clickhouse] stats refresh failed: %v", err)
 		return
 	}
 
-	newStats := make(map[string]*models.ServiceStats, len(statsRows))
-	for _, row := range statsRows {
-		ns := chString(row["namespace"])
-		svc := chString(row["service_name"])
-		reqCount := chInt(row["request_count"])
-		errCount := chInt(row["error_count"])
-		stat := &models.ServiceStats{
-			ServiceName:  svc,
-			Namespace:    ns,
-			Cluster:      chString(row["cluster"]),
-			RequestCount: reqCount,
-			ErrorCount:   errCount,
-			P50Ms:        chFloat(row["p50"]),
-			P95Ms:        chFloat(row["p95"]),
-			P99Ms:        chFloat(row["p99"]),
-			LastSeen:     chTime(row["last_seen"]),
-		}
-		if lang := chString(row["sdk_lang"]); lang != "" {
-			stat.Language = cleanLanguage(lang)
-		}
-		if reqCount <= 0 || math.IsNaN(stat.P50Ms) || math.IsNaN(stat.P95Ms) || math.IsNaN(stat.P99Ms) {
-			stat.P50Ms = 0
-			stat.P95Ms = 0
-			stat.P99Ms = 0
-		}
-		finalizeServiceStats(stat)
-		newStats[ns+":"+svc] = stat
-
-		if stat.Cluster != "" {
-			s.clustersMu.Lock()
-			s.detectedClusters[stat.Cluster] = true
-			s.clustersMu.Unlock()
-		}
+	if pods, err := s.chLoadTracePods(ctx); err != nil {
+		log.Printf("[clickhouse] pod refresh failed: %v", err)
+	} else {
+		s.tracePodsMu.Lock()
+		s.tracePods = pods
+		s.tracePodsMu.Unlock()
 	}
 
-	// 2. Recent spans for the service map / pod discovery caches (bounded).
-	//
-	// The budget is divided between the namespaces actually reporting, using
-	// LIMIT ... BY, so the cache represents every namespace rather than
-	// whichever few produce the most traffic. namespaceCount comes from the
-	// stats query above, which has no cap.
-	perNamespace := chRefreshSpanLimit
-	if namespaceCount := countNamespaces(newStats); namespaceCount > 1 {
-		perNamespace = chRefreshSpanLimit / namespaceCount
-		if perNamespace < chRefreshMinPerNamespace {
-			perNamespace = chRefreshMinPerNamespace
-		}
+	// Derived tables cover fleet KPIs and the service map. Keep the bounded
+	// recent-trace cache only when we had to fall back to raw spans, so a
+	// missing MV does not blank the map.
+	newTraces := map[string]*models.Trace{}
+	if !fromMetrics {
+		newTraces = s.chLoadRecentTraces(ctx, newStats)
 	}
 
-	spansQuery := fmt.Sprintf(`SELECT %s
-	FROM kubetrace.spans
-	WHERE timestamp > now64(6) - INTERVAL %d SECOND
-	ORDER BY timestamp DESC
-	LIMIT %d BY namespace
-	LIMIT %d`, chSpanColumns, int(chRefreshWindow.Seconds()), perNamespace, chRefreshSpanLimit*2)
-
-	spanRows, err := s.chQuery(ctx, spansQuery)
-	if err != nil {
-		log.Printf("[clickhouse] recent spans refresh failed: %v", err)
-		return
-	}
-
-	spansByTrace := make(map[string][]*models.Span)
-	for _, row := range spanRows {
-		sp := chRowToSpan(row)
-		if sp.TraceID == "" {
-			continue
-		}
-		spansByTrace[sp.TraceID] = append(spansByTrace[sp.TraceID], sp)
-	}
-	newTraces := make(map[string]*models.Trace, len(spansByTrace))
-	for id, spans := range spansByTrace {
-		newTraces[id] = buildTrace(id, spans)
-	}
-
-	// 3. Hot-swap caches.
 	s.statsMu.Lock()
 	s.statsCache = newStats
 	s.statsMu.Unlock()
@@ -899,14 +842,19 @@ func (s *Store) chAggregateEndpoints(q *models.SearchQuery) ([]*models.EndpointS
 }
 
 // chGetTrace loads a full trace by exact ID from ClickHouse.
+func chGetTraceQuery(traceID string) string {
+	return fmt.Sprintf(`SELECT %s
+	FROM kubetrace.spans
+	WHERE trace_id = '%s'
+	LIMIT 50000
+	SETTINGS optimize_use_projections = 1`, chSpanColumns, chEscape(traceID))
+}
+
 func (s *Store) chGetTrace(traceID string) (*models.Trace, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`SELECT %s
-	FROM kubetrace.spans
-	WHERE trace_id = '%s'
-	LIMIT 50000`, chSpanColumns, chEscape(traceID))
+	query := chGetTraceQuery(traceID)
 
 	rows, err := s.chQuery(ctx, query)
 	if err != nil {

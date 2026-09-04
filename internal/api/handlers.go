@@ -654,6 +654,44 @@ func (h *Handler) GetServiceMap(c *fiber.Ctx) error {
 	return c.JSON(data)
 }
 
+// GET /api/issues?namespace=&windowMinutes=&limit=
+func (h *Handler) GetIssues(c *fiber.Ctx) error {
+	ns := c.Query("namespace")
+	if ns != "" && h.store.IsNamespaceDisabled(ns) {
+		return c.JSON(fiber.Map{"issues": []models.ErrorGroup{}})
+	}
+	windowMinutes, _ := strconv.Atoi(c.Query("windowMinutes", "60"))
+	limit, _ := strconv.Atoi(c.Query("limit", "50"))
+	window := time.Duration(windowMinutes) * time.Minute
+	if window <= 0 {
+		window = time.Hour
+	}
+
+	allowed := h.allowedNamespaces(c)
+	if ns != "" && allowed != nil && !nsAllowed(allowed, ns) {
+		return c.JSON(fiber.Map{"issues": []models.ErrorGroup{}})
+	}
+
+	var allowedList []string
+	if allowed != nil {
+		for name := range allowed {
+			allowedList = append(allowedList, name)
+		}
+		if allowedList == nil {
+			allowedList = []string{}
+		}
+	}
+
+	groups, err := h.store.ListErrorGroups(ns, allowedList, window, limit)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	if groups == nil {
+		groups = []models.ErrorGroup{}
+	}
+	return c.JSON(fiber.Map{"issues": groups})
+}
+
 // GET /api/pods?namespace=
 func (h *Handler) GetPods(c *fiber.Ctx) error {
 	ns := c.Query("namespace", "")

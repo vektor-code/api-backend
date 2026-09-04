@@ -8,6 +8,16 @@ import (
 	"github.com/kubetrace/api-backend/internal/models"
 )
 
+func TestChGetTraceQueryUsesProjection(t *testing.T) {
+	q := chGetTraceQuery("abc123def456abc123def456abc123de")
+	if !strings.Contains(q, "optimize_use_projections = 1") {
+		t.Fatalf("expected projection setting, got %s", q)
+	}
+	if !strings.Contains(q, "trace_id = 'abc123def456abc123def456abc123de'") {
+		t.Fatalf("expected exact trace id predicate, got %s", q)
+	}
+}
+
 func TestChTraceIDPredicateUsesEqualityForFullHexID(t *testing.T) {
 	predicate := chTraceIDPredicate("A1234567890ABCDEF1234567890ABCDE")
 	if !strings.Contains(predicate, "trace_id =") {
@@ -158,7 +168,7 @@ func TestPromoteExceptionFromEvents(t *testing.T) {
 		Events: []models.SpanEvent{{
 			Name: "exception",
 			Attributes: map[string]string{
-				"exception.message": "1 validation error for MDM\nmdm_opening_status\n  Input should be a valid string [type=string_type, input_value=None]",
+				"exception.message":    "1 validation error for MDM\nmdm_opening_status\n  Input should be a valid string [type=string_type, input_value=None]",
 				"exception.stacktrace": "Traceback (most recent call last):\n  File ...",
 			},
 		}},
