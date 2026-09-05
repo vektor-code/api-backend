@@ -1245,19 +1245,9 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 	kafkaGroup := h.store.GetInfraConfig("KAFKA_GROUP", os.Getenv("KAFKA_GROUP"))
 
 	clickhouseURL := h.store.GetInfraConfig("CLICKHOUSE_URL", os.Getenv("CLICKHOUSE_URL"))
-
-	// Decompose the ClickHouse URL so the UI can show host/port/credentials
 	chScheme, chHost, chPort, chUser, chPass := "http", "", "", "", ""
-	if parsed, err := url.Parse(clickhouseURL); err == nil && parsed.Host != "" {
-		if parsed.Scheme != "" {
-			chScheme = parsed.Scheme
-		}
-		chHost = parsed.Hostname()
-		chPort = parsed.Port()
-		if parsed.User != nil {
-			chUser = parsed.User.Username()
-			chPass, _ = parsed.User.Password()
-		}
+	if parsed, err := parseClickHouseURL(clickhouseURL); err == nil {
+		chScheme, chHost, chPort, chUser, chPass = parsed.scheme, parsed.host, parsed.port, parsed.username, parsed.password
 	}
 
 	minioEndpoint := h.store.GetInfraConfig("MINIO_ENDPOINT", os.Getenv("MINIO_ENDPOINT"))
@@ -1275,6 +1265,14 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 	ldapBindPassword := h.store.GetInfraConfig("LDAP_BIND_PASSWORD", os.Getenv("LDAP_BIND_PASSWORD"))
 	ldapUserBaseDN := h.store.GetInfraConfig("LDAP_USER_BASE_DN", os.Getenv("LDAP_USER_BASE_DN"))
 	ldapUserFilter := h.store.GetInfraConfig("LDAP_USER_FILTER", os.Getenv("LDAP_USER_FILTER"))
+
+	prometheusURL := h.store.GetInfraConfig("PROMETHEUS_URL", os.Getenv("PROMETHEUS_URL"))
+	prometheusScrape := h.store.GetInfraConfig("PROMETHEUS_SCRAPE_INTERVAL", os.Getenv("PROMETHEUS_SCRAPE_INTERVAL"))
+	prometheusDiscovery := h.store.GetInfraConfig("PROMETHEUS_DISCOVERY_MODE", os.Getenv("PROMETHEUS_DISCOVERY_MODE"))
+
+	elasticsearchURL := h.store.GetInfraConfig("ELASTICSEARCH_URL", os.Getenv("ELASTICSEARCH_URL"))
+	elasticsearchPrefix := h.store.GetInfraConfig("ELASTICSEARCH_INDEX_PREFIX", os.Getenv("ELASTICSEARCH_INDEX_PREFIX"))
+	elasticsearchTLS := h.store.GetInfraConfig("ELASTICSEARCH_TLS_VERIFY", os.Getenv("ELASTICSEARCH_TLS_VERIFY"))
 
 	return c.JSON(fiber.Map{
 		"kafka": fiber.Map{
@@ -1305,6 +1303,16 @@ func (h *Handler) GetAdminConfig(c *fiber.Ctx) error {
 			"bindPassword": ldapBindPassword,
 			"userBaseDN":   ldapUserBaseDN,
 			"userFilter":   ldapUserFilter,
+		},
+		"prometheus": fiber.Map{
+			"url":            prometheusURL,
+			"scrapeInterval": prometheusScrape,
+			"discoveryMode":  prometheusDiscovery,
+		},
+		"elasticsearch": fiber.Map{
+			"url":         elasticsearchURL,
+			"indexPrefix": elasticsearchPrefix,
+			"tlsVerify":   elasticsearchTLS,
 		},
 		"system": fiber.Map{
 			"k8sConnected": h.k8s != nil,
@@ -1410,6 +1418,28 @@ func (h *Handler) UpdateAdminConfig(c *fiber.Ctx) error {
 		}
 		if userFilter, ok := ldap["userFilter"].(string); ok {
 			h.store.SaveInfraConfig("LDAP_USER_FILTER", userFilter)
+		}
+	}
+	if prometheus, ok := req["prometheus"].(map[string]interface{}); ok {
+		if prometheusURL, ok := prometheus["url"].(string); ok {
+			h.store.SaveInfraConfig("PROMETHEUS_URL", prometheusURL)
+		}
+		if scrapeInterval, ok := prometheus["scrapeInterval"].(string); ok {
+			h.store.SaveInfraConfig("PROMETHEUS_SCRAPE_INTERVAL", scrapeInterval)
+		}
+		if discoveryMode, ok := prometheus["discoveryMode"].(string); ok {
+			h.store.SaveInfraConfig("PROMETHEUS_DISCOVERY_MODE", discoveryMode)
+		}
+	}
+	if elasticsearch, ok := req["elasticsearch"].(map[string]interface{}); ok {
+		if elasticsearchURL, ok := elasticsearch["url"].(string); ok {
+			h.store.SaveInfraConfig("ELASTICSEARCH_URL", elasticsearchURL)
+		}
+		if indexPrefix, ok := elasticsearch["indexPrefix"].(string); ok {
+			h.store.SaveInfraConfig("ELASTICSEARCH_INDEX_PREFIX", indexPrefix)
+		}
+		if tlsVerify, ok := elasticsearch["tlsVerify"].(string); ok {
+			h.store.SaveInfraConfig("ELASTICSEARCH_TLS_VERIFY", tlsVerify)
 		}
 	}
 

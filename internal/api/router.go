@@ -75,6 +75,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Post("/admin/applications/instrumentation/toggle", h.ToggleApplicationInstrumentation)
 	api.Get("/admin/config", h.GetAdminConfig)
 	api.Post("/admin/config", h.UpdateAdminConfig)
+	api.Post("/admin/config/:tool/test", h.TestAdminToolConnection)
 	api.Get("/admin/namespaces", h.GetNamespaceStatuses)
 	api.Get("/admin/instrumentations", h.GetAdminInstrumentations)
 	api.Post("/admin/namespaces/toggle", h.ToggleNamespace)
