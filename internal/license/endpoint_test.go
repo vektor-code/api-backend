@@ -15,3 +15,17 @@ func TestEndpointHonorsOverride(t *testing.T) {
 		t.Fatalf("Endpoint() = %q", got)
 	}
 }
+
+func TestTokenDefaultsToActivationHeartbeat(t *testing.T) {
+	t.Setenv("ACTIVATION_HEARTBEAT_TOKEN", "")
+	if got := Token(); got != defaultHeartbeatToken {
+		t.Fatalf("Token() = %q, want %q", got, defaultHeartbeatToken)
+	}
+}
+
+func TestTokenHonorsOverride(t *testing.T) {
+	t.Setenv("ACTIVATION_HEARTBEAT_TOKEN", "custom-token")
+	if got := Token(); got != "custom-token" {
+		t.Fatalf("Token() = %q", got)
+	}
+}
