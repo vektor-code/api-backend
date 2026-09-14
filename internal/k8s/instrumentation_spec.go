@@ -91,28 +91,44 @@ func pythonInstrumentationSpec(image, endpoint string) map[string]interface{} {
 	}
 }
 
-func goInstrumentationSpec(image, httpEndpoint string) map[string]interface{} {
-	return map[string]interface{}{
+func goInstrumentationEnv(endpoint string) []interface{} {
+	env := []interface{}{
+		kv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint),
+		kv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+		kv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf"),
+		kv("OTEL_METRICS_EXPORTER", "none"),
+		kv("OTEL_LOGS_EXPORTER", "none"),
+		kv("OTEL_GO_AUTO_GLOBAL", envOr("OTEL_GO_AUTO_GLOBAL", "true")),
+	}
+	return append(env, batchAndLimitEnv()...)
+}
+
+func goInstrumentationSpec(image, httpEndpoint string, compatible bool) map[string]interface{} {
+	spec := map[string]interface{}{
 		"image": image,
-		"env":   pythonInstrumentationEnv(httpEndpoint),
+		"env":   goInstrumentationEnv(httpEndpoint),
 		"resourceRequirements": map[string]interface{}{
 			"limits": map[string]interface{}{
-				"cpu":    "500m",
-				"memory": "256Mi",
+				"cpu":    envOr("OTEL_GO_CPU_LIMIT", "750m"),
+				"memory": envOr("OTEL_GO_MEMORY_LIMIT", "512Mi"),
 			},
 			"requests": map[string]interface{}{
-				"cpu":    "50m",
-				"memory": "64Mi",
-			},
-		},
-		"securityContext": map[string]interface{}{
-			"privileged":               true,
-			"allowPrivilegeEscalation": true,
-			"capabilities": map[string]interface{}{
-				"add": []interface{}{"SYS_PTRACE"},
+				"cpu":    envOr("OTEL_GO_CPU_REQUEST", "100m"),
+				"memory": envOr("OTEL_GO_MEMORY_REQUEST", "128Mi"),
 			},
 		},
 	}
+	if !compatible {
+		spec["securityContext"] = map[string]interface{}{
+			"privileged":               true,
+			"runAsUser":                int64(0),
+			"allowPrivilegeEscalation": true,
+			"capabilities": map[string]interface{}{
+				"add": []interface{}{"SYS_PTRACE", "SYS_ADMIN"},
+			},
+		}
+	}
+	return spec
 }
 
 // InstrumentationName returns the standard Instrumentation CR name for a namespace.
@@ -155,7 +171,7 @@ func buildInstrumentationObjectOpts(namespace, agentNamespace string, compatible
 		"nodejs":      nodejsInstrumentationSpec(instrumentationImages.nodejs),
 		"python":      pythonCaptureInstrumentationSpec(instrumentationImages.python, httpEndpoint),
 		"dotnet":      pythonInstrumentationSpec(instrumentationImages.dotnet, httpEndpoint),
-		"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint),
+		"go":          goInstrumentationSpec(instrumentationImages.golang, httpEndpoint, compatible),
 	}
 	if !compatible {
 		spec["resource"] = map[string]interface{}{

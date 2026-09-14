@@ -17,8 +17,8 @@ func TestGuessGoTargetExeFromContainerName(t *testing.T) {
 		},
 	}
 
-	if got := guessGoTargetExe(template); got != "/reverse-proxy" {
-		t.Fatalf("guessGoTargetExe() = %q, want /reverse-proxy", got)
+	if got := guessGoTargetExe(template); got != "/app/reverse-proxy" {
+		t.Fatalf("guessGoTargetExe() = %q, want /app/reverse-proxy", got)
 	}
 }
 
@@ -46,8 +46,8 @@ func TestPatchPodTemplateSetsGoTargetAndCleansStaleAnnotations(t *testing.T) {
 	if _, ok := template.Annotations["instrumentation.opentelemetry.io/inject-python"]; ok {
 		t.Fatalf("stale inject-python annotation was not removed")
 	}
-	if got := template.Annotations["instrumentation.opentelemetry.io/otel-go-auto-target-exe"]; got != "/reverse-proxy" {
-		t.Fatalf("go target exe = %q, want /reverse-proxy", got)
+	if got := template.Annotations["instrumentation.opentelemetry.io/otel-go-auto-target-exe"]; got != "/app/reverse-proxy" {
+		t.Fatalf("go target exe = %q, want /app/reverse-proxy", got)
 	}
 }
 

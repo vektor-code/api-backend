@@ -29,6 +29,13 @@ func TestBuildInstrumentationObjectUsesFastExport(t *testing.T) {
 	if got := envValue(goSpec["env"].([]interface{}), "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {
 		t.Fatalf("go protocol = %q, want http/protobuf", got)
 	}
+	if got := envValue(goSpec["env"].([]interface{}), "OTEL_GO_AUTO_GLOBAL"); got != "true" {
+		t.Fatalf("OTEL_GO_AUTO_GLOBAL = %q, want true", got)
+	}
+	sec := goSpec["securityContext"].(map[string]interface{})
+	if sec["runAsUser"] != int64(0) {
+		t.Fatalf("go runAsUser = %#v, want 0", sec["runAsUser"])
+	}
 }
 
 func TestBuildInstrumentationObjectCapturesHTTPHeaders(t *testing.T) {
@@ -66,6 +73,10 @@ func TestBuildCompatibleInstrumentationObjectOmitsOptionalFields(t *testing.T) {
 	}
 	if _, ok := spec["java"]; !ok {
 		t.Fatal("compatible spec should still include java")
+	}
+	goSpec := spec["go"].(map[string]interface{})
+	if _, ok := goSpec["securityContext"]; ok {
+		t.Fatal("compatible go spec must omit securityContext for older CRDs")
 	}
 }
 

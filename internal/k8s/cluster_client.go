@@ -345,6 +345,12 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 		return "/app"
 	}
 	c := template.Spec.Containers[0]
+	for _, cand := range template.Spec.Containers {
+		if !isSidecarContainer(cand.Name, cand.Image) {
+			c = cand
+			break
+		}
+	}
 	parts := append(append([]string{}, c.Command...), c.Args...)
 	wrappers := map[string]bool{"sh": true, "bash": true, "ash": true, "/bin/sh": true, "/bin/bash": true, "entrypoint.sh": true, "docker-entrypoint.sh": true, "dumb-init": true, "tini": true, "env": true, "/usr/bin/env": true}
 	for _, part := range parts {
@@ -367,7 +373,7 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 		}
 	}
 	if name := executableName(c.Name); name != "" && !genericProcessName(name) {
-		return "/" + name
+		return "/app/" + name
 	}
 	imageName := c.Image
 	if slash := strings.LastIndex(imageName, "/"); slash >= 0 {
@@ -380,7 +386,7 @@ func guessGoTargetExe(template *corev1.PodTemplateSpec) string {
 		imageName = imageName[:at]
 	}
 	if name := executableName(imageName); name != "" && !genericProcessName(name) {
-		return "/" + name
+		return "/app/" + name
 	}
 	return "/app"
 }
