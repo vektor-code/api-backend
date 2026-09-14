@@ -5,8 +5,13 @@ import (
 	"strings"
 )
 
+const defaultActivationEndpoint = "https://activation.cloudraft.net"
+
 func Endpoint() string {
-	return strings.TrimRight(strings.TrimSpace(os.Getenv("ACTIVATION_ENDPOINT")), "/")
+	if ep := strings.TrimRight(strings.TrimSpace(os.Getenv("ACTIVATION_ENDPOINT")), "/"); ep != "" {
+		return ep
+	}
+	return defaultActivationEndpoint
 }
 
 func Token() string {
