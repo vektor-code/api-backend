@@ -105,6 +105,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/admin/retention", h.GetRetention)
 	api.Post("/admin/retention", h.UpdateRetention)
 	api.Post("/admin/retention/clear", h.ClearAllTraces)
+	api.Get("/admin/platform/health", h.GetPlatformHealth)
 
 	// WebSocket live stream — JWT required (query token= or Authorization)
 	app.Use("/ws", func(c *fiber.Ctx) error {

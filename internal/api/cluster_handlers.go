@@ -16,7 +16,7 @@ func (h *Handler) requireAdmin(c *fiber.Ctx) error {
 	if ok {
 		claims, ok := userClaims.Claims.(jwt.MapClaims)
 		if ok && claims["role"] != "admin" {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+			return fiber.NewError(fiber.StatusForbidden, "Forbidden: admin access required")
 		}
 	}
 	return nil

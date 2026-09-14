@@ -8,13 +8,14 @@ import (
 	"github.com/kubetrace/api-backend/internal/store"
 )
 
-// requireAdmin returns an error response when the caller is not an admin.
+// requireAdmin returns an error when the caller is not an admin.
+// Callers must return the error so the handler stops (do not write a body here).
 func requireAdmin(c *fiber.Ctx) error {
 	userClaims, ok := c.Locals("user").(*jwt.Token)
 	if ok {
 		claims, ok := userClaims.Claims.(jwt.MapClaims)
 		if ok && claims["role"] != "admin" {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Forbidden: admin access required"})
+			return fiber.NewError(fiber.StatusForbidden, "Forbidden: admin access required")
 		}
 	}
 	return nil

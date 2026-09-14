@@ -73,6 +73,21 @@ func (s *Store) IsAgentManagedCluster(clusterID string) bool {
 	return time.Now().UTC().Sub(info.LastSeen) <= agentHeartbeatTTL
 }
 
+// ListAgentClusterHeartbeats returns all known agent heartbeats (including expired).
+func (s *Store) ListAgentClusterHeartbeats() []AgentClusterInfo {
+	s.initAgentRegistry()
+	s.agentClusters.mu.RLock()
+	defer s.agentClusters.mu.RUnlock()
+	result := make([]AgentClusterInfo, 0, len(s.agentClusters.clusters))
+	for _, info := range s.agentClusters.clusters {
+		result = append(result, info)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ClusterID < result[j].ClusterID
+	})
+	return result
+}
+
 // GetAgentNamespaceForCluster returns the namespace where agent-backend runs on a cluster.
 func (s *Store) GetAgentNamespaceForCluster(clusterID string) string {
 	s.initAgentRegistry()

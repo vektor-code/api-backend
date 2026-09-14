@@ -20,6 +20,7 @@ import (
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/license"
 	"github.com/kubetrace/api-backend/internal/models"
+	"github.com/kubetrace/api-backend/internal/platformhealth"
 	"github.com/kubetrace/api-backend/internal/store"
 	"github.com/kubetrace/api-backend/internal/tracediag"
 	"github.com/kubetrace/api-backend/internal/traceinvest"
@@ -1018,6 +1019,7 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 			Pods             []store.ReportedPod              `json:"pods"`
 			Nodes            []store.ReportedNode             `json:"nodes"`
 			Instrumentations *[]store.ReportedInstrumentation `json:"instrumentations"`
+			PlatformHealth   *platformhealth.Report           `json:"platformHealth"`
 		}
 		if err := c.BodyParser(&req); err == nil {
 			if req.Cluster != "" {
@@ -1053,6 +1055,9 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 			}
 			if req.Instrumentations != nil {
 				h.store.SetReportedInstrumentationsForCluster(clusterID, *req.Instrumentations)
+			}
+			if req.PlatformHealth != nil {
+				h.store.SetAgentPlatformHealth(clusterID, req.PlatformHealth)
 			}
 		}
 	}

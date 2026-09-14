@@ -83,6 +83,8 @@ type Store struct {
 
 	agentClusters *agentClusterRegistry
 
+	platformHealth *platformHealthRegistry
+
 	// ClickHouse mode: reads served by ClickHouse, writes streamed to Kafka.
 	// Replaces the per-span MinIO uploads and the MinIO state-file gossip.
 	chMode     bool
