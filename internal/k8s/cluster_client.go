@@ -149,10 +149,14 @@ func containerImagesAndCommands(containers []corev1.Container) (images, commands
 
 func resolveLanguage(requested string, containers []corev1.Container) string {
 	req := strings.ToLower(strings.TrimSpace(requested))
-	if req == "unknown" || req == "auto" {
+	if req == "unknown" || req == "auto" || req == "detect" || req == "automatic" {
 		req = ""
 	}
-	images, commands := containerImagesAndCommands(containers)
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: containers}}
+	if req == "" {
+		return detectLanguageFromPodSpec(pod)
+	}
+	images, commands := containerImagesAndCommands(appContainers(containers))
 	return resolveInject(req, images, commands)
 }
 
@@ -169,9 +173,16 @@ func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready i
 	for k, v := range template.Labels {
 		labels[k] = v
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: template.Annotations, Labels: template.Labels}, Spec: template.Spec}
-	images, commands := containerImagesAndCommands(template.Spec.Containers)
-	lang := resolveInject(languageFromLabels(template.Labels), images, commands)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: template.Annotations,
+			Labels:      template.Labels,
+		},
+		Spec: template.Spec,
+	}
+	lang := detectLanguageFromPodSpec(pod)
 	instr, _, details := detectInstrumentation(pod)
 	return WorkloadInfo{
 		Name:         name,
@@ -222,7 +233,11 @@ func detectLanguageFromPodTemplate(template *corev1.PodTemplateSpec) string {
 	if template == nil {
 		return ""
 	}
-	return resolveLanguage("", template.Spec.Containers)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Labels: template.Labels, Annotations: template.Annotations},
+		Spec:       template.Spec,
+	}
+	return detectLanguageFromPodSpec(pod)
 }
 
 func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {

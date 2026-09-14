@@ -262,10 +262,7 @@ func isFrontendPod(p *corev1.Pod) bool {
 }
 
 func detectLanguage(p *corev1.Pod) string {
-	if p == nil {
-		return ""
-	}
-	return resolveLanguage("", p.Spec.Containers)
+	return detectLanguageFromPodSpec(p)
 }
 
 func detectInstrumentation(p *corev1.Pod) (bool, string, string) {

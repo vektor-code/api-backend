@@ -29,7 +29,8 @@ func TestNodeSSRKept(t *testing.T) {
 }
 
 func TestLanguageFromLabels(t *testing.T) {
-	got := languageFromLabels(map[string]string{"app.kubernetes.io/language": "javascript"})
+	raw := languageFromLabels(map[string]string{"app.kubernetes.io/language": "javascript"})
+	got := normalizeDetectLang(raw)
 	if got != "nodejs" {
 		t.Fatalf("got %s, want nodejs", got)
 	}
