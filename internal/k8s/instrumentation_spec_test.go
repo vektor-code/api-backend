@@ -1,6 +1,9 @@
 package k8s
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildInstrumentationObjectAddsPythonEnvOverrides(t *testing.T) {
 	inst := BuildInstrumentationObject("troni-dev", "crnet-apm")
@@ -24,6 +27,11 @@ func TestBuildInstrumentationObjectUsesFastExport(t *testing.T) {
 	spec := inst["spec"].(map[string]interface{})
 	if got := envValue(spec["env"].([]interface{}), "OTEL_BSP_SCHEDULE_DELAY"); got != "500" {
 		t.Fatalf("OTEL_BSP_SCHEDULE_DELAY = %q, want 500", got)
+	}
+	dotnet := spec["dotnet"].(map[string]interface{})
+	dotnetImage, _ := dotnet["image"].(string)
+	if !strings.Contains(dotnetImage, "autoinstrumentation-dotnet") {
+		t.Fatalf("dotnet image = %q, want autoinstrumentation-dotnet", dotnetImage)
 	}
 	goSpec := spec["go"].(map[string]interface{})
 	if got := envValue(goSpec["env"].([]interface{}), "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "http/protobuf" {

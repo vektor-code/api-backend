@@ -346,7 +346,7 @@ func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Bypass auth for non-API, health, ingestion, and public auth routes
 		path := c.Path()
-		if path == "/api/auth/login" || path == "/api/auth/lookup" || path == "/api/auth/refresh" || path == "/api/health" || path == "/health" || path == "/ready" || path == "/v1/traces" || path == "/api/ingest" {
+		if path == "/api/auth/login" || path == "/api/auth/lookup" || path == "/api/auth/refresh" || path == "/api/health" || path == "/health" || path == "/ready" {
 			return c.Next()
 		}
 

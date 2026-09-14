@@ -19,7 +19,7 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders: "Content-Type,Authorization",
+		AllowHeaders: "Content-Type,Authorization,X-CRNET-Ingest-Token,X-CRNET-Agent-Token",
 	}))
 	app.Use(LicenseMiddleware(h))
 
@@ -27,13 +27,14 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	app.Get("/health", h.Health)
 	app.Get("/ready", h.Health)
 
-	// OTLP ingestion
-	app.Post("/v1/traces", recv.HandleHTTP)
-	app.Get("/v1/namespaces/config", h.GetNamespaceConfig)
-	app.Post("/v1/namespaces/config", h.GetNamespaceConfig)
-	app.Get("/v1/investigations/jobs", h.ClaimInvestigationJobs)
-	app.Post("/v1/investigations/results", h.SubmitInvestigationResult)
-	app.Post("/api/ingest", recv.IngestJSON)
+	// OTLP ingest + agent control — shared ingest token when configured.
+	ingestAuth := IngestAuthMiddleware()
+	app.Post("/v1/traces", ingestAuth, recv.HandleHTTP)
+	app.Get("/v1/namespaces/config", ingestAuth, h.GetNamespaceConfig)
+	app.Post("/v1/namespaces/config", ingestAuth, h.GetNamespaceConfig)
+	app.Get("/v1/investigations/jobs", ingestAuth, h.ClaimInvestigationJobs)
+	app.Post("/v1/investigations/results", ingestAuth, h.SubmitInvestigationResult)
+	app.Post("/api/ingest", ingestAuth, recv.IngestJSON)
 
 	// REST API
 	api := app.Group("/api", AuthMiddleware())
@@ -62,6 +63,16 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Get("/servicemap", h.GetServiceMap)
 	api.Get("/issues", h.GetIssues)
 	api.Get("/pods", h.GetPods)
+
+	// Alerting (server-side rules / channels / active firings)
+	api.Get("/alerts/rules", h.ListAlertRules)
+	api.Post("/alerts/rules", h.UpsertAlertRule)
+	api.Delete("/alerts/rules/:id", h.DeleteAlertRule)
+	api.Get("/alerts/channels", h.ListAlertChannels)
+	api.Post("/alerts/channels", h.UpsertAlertChannel)
+	api.Delete("/alerts/channels/:id", h.DeleteAlertChannel)
+	api.Get("/alerts/active", h.ListActiveAlerts)
+	api.Post("/alerts/evaluate", h.EvaluateAlertsNow)
 
 	// Admin & cluster routes
 	api.Get("/clusters", h.GetClusters)
@@ -95,12 +106,12 @@ func SetupRouter(app *fiber.App, h *Handler, recv *collector.Receiver) {
 	api.Post("/admin/retention", h.UpdateRetention)
 	api.Post("/admin/retention/clear", h.ClearAllTraces)
 
-	// WebSocket (WebSocket connections bypass middleware and authenticate using standard query tokens or handshake if needed, but we keep websocket endpoint unauthenticated for live-stream connections or let it pass through)
+	// WebSocket live stream — JWT required (query token= or Authorization)
 	app.Use("/ws", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) {
-			return c.Next()
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
 		}
-		return fiber.ErrUpgradeRequired
+		return WSAuthMiddleware()(c)
 	})
 	app.Get("/ws", websocket.New(h.LiveStream))
 }

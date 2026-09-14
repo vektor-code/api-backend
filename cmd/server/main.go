@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/kubetrace/api-backend/internal/api"
+	"github.com/kubetrace/api-backend/internal/alerts"
 	"github.com/kubetrace/api-backend/internal/collector"
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/license"
@@ -105,6 +106,31 @@ func main() {
 	handler.SetLicenseGate(licenseChecker)
 	_ = licenseChecker.Start(context.Background())
 	defer func() { _ = licenseChecker.Stop(context.Background()) }()
+
+	alertEngine := alerts.NewEngine(alerts.NewMemoryStore(), alerts.NewNotifier(nil), func(ctx context.Context) ([]alerts.ServiceSample, error) {
+		stats, err := traceStore.GetNamespaceStats()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]alerts.ServiceSample, 0)
+		for _, ns := range stats {
+			for _, s := range ns.Services {
+				out = append(out, alerts.ServiceSample{
+					ServiceName: s.ServiceName,
+					Namespace:   s.Namespace,
+					ErrorRate:   s.ErrorRate,
+					P95Ms:       s.P95Ms,
+					P99Ms:       s.P99Ms,
+				})
+			}
+		}
+		return out, nil
+	})
+	handler.SetAlertEngine(alertEngine)
+	alertCtx, alertCancel := context.WithCancel(context.Background())
+	defer alertCancel()
+	go alertEngine.Run(alertCtx)
+
 	receiver := collector.NewReceiver(traceStore, sampler, handler.OnSpan)
 
 	if *demoMode {

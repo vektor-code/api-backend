@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/kubetrace/api-backend/internal/alerts"
 	"github.com/kubetrace/api-backend/internal/k8s"
 	"github.com/kubetrace/api-backend/internal/license"
 	"github.com/kubetrace/api-backend/internal/models"
@@ -115,6 +116,7 @@ type Handler struct {
 	hub         *Hub
 	invest      *traceinvest.Store
 	licenseGate *license.Checker
+	alerts      *alerts.Engine
 }
 
 // NewHandler creates the API handler
@@ -125,6 +127,10 @@ func NewHandler(s *store.Store, w *k8s.Watcher) *Handler {
 		hub:    newHub(),
 		invest: traceinvest.NewStore(),
 	}
+}
+
+func (h *Handler) SetAlertEngine(engine *alerts.Engine) {
+	h.alerts = engine
 }
 
 func (h *Handler) SetLicenseGate(checker *license.Checker) {
