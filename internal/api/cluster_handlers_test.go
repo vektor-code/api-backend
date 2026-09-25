@@ -38,3 +38,50 @@ func TestWorkloadsFromReportedPodsPrefersNonEmptyLanguage(t *testing.T) {
 		t.Fatalf("Ready = %d, want 2", w.Ready)
 	}
 }
+
+func TestWorkloadsFromReportedPodsSkipsDeadPods(t *testing.T) {
+	pods := []store.ReportedPod{
+		{
+			Namespace: "dev",
+			Name:      "app-abc",
+			Labels:    map[string]string{"app.kubernetes.io/name": "app"},
+			Phase:     "Running",
+			Ready:     true,
+		},
+		{
+			Namespace: "dev",
+			Name:      "app-failed",
+			Labels:    map[string]string{"app.kubernetes.io/name": "app"},
+			Phase:     "Failed",
+			Ready:     false,
+		},
+		{
+			Namespace: "dev",
+			Name:      "app-succeeded",
+			Labels:    map[string]string{"app.kubernetes.io/name": "app"},
+			Phase:     "Succeeded",
+			Ready:     false,
+		},
+		{
+			Namespace: "dev",
+			Name:      "app-unknown",
+			Labels:    map[string]string{"app.kubernetes.io/name": "app"},
+			Phase:     "Unknown",
+			Ready:     false,
+		},
+		{
+			Namespace: "dev",
+			Name:      "",
+			Labels:    map[string]string{"app.kubernetes.io/name": "ghost"},
+			Phase:     "Running",
+			Ready:     true,
+		},
+	}
+	workloads := workloadsFromReportedPods(pods)
+	if len(workloads) != 1 {
+		t.Fatalf("got %d workloads, want 1", len(workloads))
+	}
+	if workloads[0].Replicas != 1 {
+		t.Fatalf("Replicas = %d, want 1 (dead/empty pods skipped)", workloads[0].Replicas)
+	}
+}

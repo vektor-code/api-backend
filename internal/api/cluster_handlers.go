@@ -263,9 +263,21 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 	})
 }
 
+func isDeadPodPhase(phase string) bool {
+	switch phase {
+	case "Failed", "Succeeded", "Unknown":
+		return true
+	default:
+		return false
+	}
+}
+
 func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {
 	seen := make(map[string]k8s.WorkloadInfo)
 	for _, p := range pods {
+		if p.Name == "" || isDeadPodPhase(p.Phase) {
+			continue
+		}
 		name := p.ServiceName()
 		key := p.Namespace + "/" + name
 		if existing, ok := seen[key]; ok {

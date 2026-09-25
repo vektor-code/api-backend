@@ -249,7 +249,7 @@ func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument Deployment %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
-	patchPodTemplate(&deploy.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
+	patchPodTemplate(&deploy.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 	return resolvedLang, err
 }
@@ -263,7 +263,7 @@ func patchStatefulSet(ctx context.Context, client kubernetes.Interface, namespac
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument StatefulSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
-	patchPodTemplate(&sts.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
+	patchPodTemplate(&sts.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
 	return resolvedLang, err
 }
@@ -277,12 +277,12 @@ func patchDaemonSet(ctx context.Context, client kubernetes.Interface, namespace,
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument DaemonSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
-	patchPodTemplate(&ds.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, enabled)
+	patchPodTemplate(&ds.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
 	return resolvedLang, err
 }
 
-func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentationName, endpoint, namespace, clusterID string, enabled bool) {
+func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentationName, endpoint, namespace, clusterID, workloadName string, enabled bool) {
 	if template.Annotations == nil {
 		template.Annotations = make(map[string]string)
 	}
@@ -318,7 +318,7 @@ func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentatio
 	origLang := strings.ToLower(strings.TrimSpace(language))
 	for i := range template.Spec.Containers {
 		if enabled && (injectLang == "sdk" || origLang == "php" || origLang == "ruby" || origLang == "rails") {
-			setLibraryEnvVars(&template.Spec.Containers[i], httpEndpoint, namespace, clusterID, origLang)
+			setLibraryEnvVars(&template.Spec.Containers[i], httpEndpoint, namespace, clusterID, workloadName, origLang)
 		} else {
 			removeOTelEnvVars(&template.Spec.Containers[i])
 		}
@@ -411,14 +411,18 @@ func executableName(value string) string {
 	return value
 }
 
-func setLibraryEnvVars(container *corev1.Container, endpoint, namespace, clusterID, lang string) {
+func setLibraryEnvVars(container *corev1.Container, endpoint, namespace, clusterID, workloadName, lang string) {
+	serviceName := strings.TrimSpace(workloadName)
+	if serviceName == "" {
+		serviceName = container.Name
+	}
 	envMap := map[string]string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
 		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
 		"OTEL_TRACES_EXPORTER":        "otlp",
 		"OTEL_METRICS_EXPORTER":       "none",
 		"OTEL_LOGS_EXPORTER":          "none",
-		"OTEL_SERVICE_NAME":           container.Name,
+		"OTEL_SERVICE_NAME":           serviceName,
 		"OTEL_RESOURCE_ATTRIBUTES":    fmt.Sprintf("k8s.namespace.name=%s,service.namespace=%s,k8s.cluster.name=%s", namespace, namespace, clusterID),
 	}
 	if lang == "php" {

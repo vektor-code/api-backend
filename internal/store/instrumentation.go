@@ -147,6 +147,46 @@ func (s *Store) saveWorkloadInstrumentationsToMinIO(list []WorkloadInstrumentati
 	return err
 }
 
+// DisableWorkloadInstrumentationsInNamespace sets enabled=false for every workload
+// instrumentation row in the given namespace (Postgres UPDATE or MinIO rewrite).
+func (s *Store) DisableWorkloadInstrumentationsInNamespace(namespace string) (int, error) {
+	s.ensureWorkloadInstrumentationTable()
+	if namespace == "" {
+		return 0, nil
+	}
+	if s.postgresEnabled && s.db != nil {
+		res, err := s.db.Exec(`
+			UPDATE workload_instrumentation
+			SET enabled = false, updated_at = CURRENT_TIMESTAMP
+			WHERE namespace = $1 AND enabled = true
+		`, namespace)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	}
+	list, err := s.getWorkloadInstrumentationsFromMinIO("")
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for i := range list {
+		if list[i].Namespace == namespace && list[i].Enabled {
+			list[i].Enabled = false
+			list[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			updated++
+		}
+	}
+	if updated == 0 {
+		return 0, nil
+	}
+	if err := s.saveWorkloadInstrumentationsToMinIO(list); err != nil {
+		return 0, err
+	}
+	return updated, nil
+}
+
 // IsWorkloadInstrumentationEnabled checks if instrumentation is enabled for a workload.
 func (s *Store) IsWorkloadInstrumentationEnabled(clusterID, namespace, kind, name string) (bool, bool) {
 	list, err := s.GetWorkloadInstrumentations(clusterID)

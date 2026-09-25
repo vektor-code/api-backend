@@ -38,7 +38,7 @@ func TestPatchPodTemplateSetsGoTargetAndCleansStaleAnnotations(t *testing.T) {
 		},
 	}
 
-	patchPodTemplate(template, "go", "highping-client-instrumentation", "http://agent:4317", "highping-client", "default", true)
+	patchPodTemplate(template, "go", "highping-client-instrumentation", "http://agent:4317", "highping-client", "default", "reverse-proxy", true)
 
 	if got := template.Annotations["instrumentation.opentelemetry.io/inject-go"]; got != "highping-client-instrumentation" {
 		t.Fatalf("inject-go = %q, want highping-client-instrumentation", got)
@@ -60,7 +60,7 @@ func TestPatchPodTemplatePHPUsesSDKAndAutoload(t *testing.T) {
 			}},
 		},
 	}
-	patchPodTemplate(template, "php", "ns-instrumentation", "http://agent:4317", "billing", "cluster-a", true)
+	patchPodTemplate(template, "php", "ns-instrumentation", "http://agent:4317", "billing", "cluster-a", "billing", true)
 	if got := template.Annotations["instrumentation.opentelemetry.io/inject-sdk"]; got != "ns-instrumentation" {
 		t.Fatalf("inject-sdk = %q", got)
 	}
@@ -78,5 +78,10 @@ func TestPatchPodTemplatePHPUsesSDKAndAutoload(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("missing OTEL_PHP_AUTOLOAD_ENABLED")
+	}
+	for _, env := range template.Spec.Containers[0].Env {
+		if env.Name == "OTEL_SERVICE_NAME" && env.Value != "billing" {
+			t.Fatalf("OTEL_SERVICE_NAME = %q, want billing", env.Value)
+		}
 	}
 }

@@ -1062,14 +1062,23 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 		}
 	}
 
-	disabled := h.store.GetExplicitlyEnabledNamespaces()
+	enabledNamespaces := h.store.GetExplicitlyEnabledNamespaces()
+	enabledSet := make(map[string]bool, len(enabledNamespaces))
+	for _, ns := range enabledNamespaces {
+		enabledSet[ns] = true
+	}
 	workloads, _ := h.store.GetWorkloadInstrumentations(clusterID)
+	for i := range workloads {
+		if !enabledSet[workloads[i].Namespace] {
+			workloads[i].Enabled = false
+		}
+	}
 	var investigations []traceinvest.Intent
 	if c.Method() == "POST" && h.invest != nil {
 		investigations = h.invest.Claim(clusterID, 5, time.Now())
 	}
 	return c.JSON(fiber.Map{
-		"enabled":        disabled,
+		"enabled":        enabledNamespaces,
 		"disabled":       []string{},
 		"cluster":        clusterID,
 		"workloads":      workloads,
@@ -1568,6 +1577,11 @@ func (h *Handler) ToggleNamespace(c *fiber.Ctx) error {
 	err := h.store.ToggleNamespace(req.Namespace, req.Disabled)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if req.Disabled {
+		if _, err := h.store.DisableWorkloadInstrumentationsInNamespace(req.Namespace); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
 	}
 
 	if h.k8s != nil {
