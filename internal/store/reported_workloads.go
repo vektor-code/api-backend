@@ -25,15 +25,40 @@ func reportedWorkloadKey(clusterID, ns string) string {
 	return clusterID + "/" + ns
 }
 
+// mergePreserveWorkloadLanguage keeps a previously reported language when a
+// fresh sync omits it (e.g. pod template lacks cmdline but we detected java
+// on an earlier probe).
+func mergePreserveWorkloadLanguage(prev, incoming []ReportedWorkload) []ReportedWorkload {
+	if len(prev) == 0 {
+		return incoming
+	}
+	prevLang := make(map[string]string, len(prev))
+	for _, w := range prev {
+		if w.Language != "" {
+			prevLang[w.Namespace+"/"+w.Name] = w.Language
+		}
+	}
+	for i := range incoming {
+		if incoming[i].Language == "" {
+			if lang, ok := prevLang[incoming[i].Namespace+"/"+incoming[i].Name]; ok {
+				incoming[i].Language = lang
+			}
+		}
+	}
+	return incoming
+}
+
 func (s *Store) SetReportedWorkloadsForCluster(clusterID, ns string, workloads []ReportedWorkload) {
 	s.reportedWorkloadsMu.Lock()
 	defer s.reportedWorkloadsMu.Unlock()
 	if s.reportedWorkloads == nil {
 		s.reportedWorkloads = make(map[string][]ReportedWorkload)
 	}
+	key := reportedWorkloadKey(clusterID, ns)
+	prev := s.reportedWorkloads[key]
 	copied := make([]ReportedWorkload, len(workloads))
 	copy(copied, workloads)
-	s.reportedWorkloads[reportedWorkloadKey(clusterID, ns)] = copied
+	s.reportedWorkloads[key] = mergePreserveWorkloadLanguage(prev, copied)
 }
 
 func (s *Store) GetReportedWorkloadsForCluster(clusterID, ns string) []ReportedWorkload {

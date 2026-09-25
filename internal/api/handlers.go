@@ -1072,6 +1072,25 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 					h.store.SetReportedWorkloadsForCluster(clusterID, ns, nil)
 				}
 			}
+			workloadKindByService := make(map[string]string, len(reported))
+			for _, w := range reported {
+				if w.Language != "" {
+					_ = h.store.RememberDetectedLanguage(clusterID, w.Namespace, w.Kind, w.Name, w.Language)
+				}
+				if w.Name != "" {
+					workloadKindByService[w.Namespace+"/"+w.Name] = w.Kind
+				}
+			}
+			for _, p := range req.Pods {
+				if p.Language == "" {
+					continue
+				}
+				svc := p.ServiceName()
+				if svc == "" {
+					continue
+				}
+				_ = h.store.RememberDetectedLanguage(clusterID, p.Namespace, workloadKindByService[p.Namespace+"/"+svc], svc, p.Language)
+			}
 			if len(req.Nodes) > 0 {
 				h.store.SetReportedNodesForCluster(clusterID, req.Nodes)
 				h.store.SetReportedNodes(req.Nodes)

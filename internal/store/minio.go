@@ -549,14 +549,16 @@ func (s *Store) GetClusterInventory() ([]ClusterInventoryItem, error) {
 		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS credential_type VARCHAR(50) DEFAULT 'kubeconfig'`)
 		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS api_server VARCHAR(512) DEFAULT ''`)
 		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS agent_namespace VARCHAR(255) DEFAULT ''`)
+		_, _ = s.db.Exec(`ALTER TABLE cluster_inventory ADD COLUMN IF NOT EXISTS managed_by_agent BOOLEAN DEFAULT false`)
+		_, _ = s.db.Exec(`UPDATE cluster_inventory SET managed_by_agent = true WHERE credential_type = 'agent'`)
 
-		rows, err := s.db.Query("SELECT id, display_name, token, status, COALESCE(credential_type,'kubeconfig'), COALESCE(api_server,''), COALESCE(agent_namespace,'') FROM cluster_inventory")
+		rows, err := s.db.Query("SELECT id, display_name, token, status, COALESCE(credential_type,'kubeconfig'), COALESCE(api_server,''), COALESCE(agent_namespace,''), COALESCE(managed_by_agent,false) FROM cluster_inventory")
 		if err == nil {
 			defer rows.Close()
 			var list []ClusterInventoryItem
 			for rows.Next() {
 				var item ClusterInventoryItem
-				if err := rows.Scan(&item.ID, &item.DisplayName, &item.Token, &item.Status, &item.CredentialType, &item.APIServer, &item.AgentNamespace); err == nil {
+				if err := rows.Scan(&item.ID, &item.DisplayName, &item.Token, &item.Status, &item.CredentialType, &item.APIServer, &item.AgentNamespace, &item.ManagedByAgent); err == nil {
 					list = append(list, item)
 				}
 			}
@@ -607,10 +609,10 @@ func (s *Store) SaveClusterInventory(list []ClusterInventoryItem) error {
 
 		for _, item := range list {
 			_, err := s.db.Exec(`
-				INSERT INTO cluster_inventory (id, display_name, token, status, credential_type, api_server, agent_namespace, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-				ON CONFLICT (id) DO UPDATE SET display_name = $2, token = $3, status = $4, credential_type = $5, api_server = $6, agent_namespace = $7, updated_at = CURRENT_TIMESTAMP
-			`, item.ID, item.DisplayName, item.Token, item.Status, defaultCredentialType(item.CredentialType), item.APIServer, defaultAgentNamespace(item.AgentNamespace))
+				INSERT INTO cluster_inventory (id, display_name, token, status, credential_type, api_server, agent_namespace, managed_by_agent, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+				ON CONFLICT (id) DO UPDATE SET display_name = $2, token = $3, status = $4, credential_type = $5, api_server = $6, agent_namespace = $7, managed_by_agent = $8, updated_at = CURRENT_TIMESTAMP
+			`, item.ID, item.DisplayName, item.Token, item.Status, defaultCredentialType(item.CredentialType), item.APIServer, defaultAgentNamespace(item.AgentNamespace), item.ManagedByAgent)
 			if err != nil {
 				return err
 			}

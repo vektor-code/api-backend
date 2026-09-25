@@ -13,14 +13,15 @@ import (
 
 // WorkloadInstrumentation tracks per-application instrumentation preferences.
 type WorkloadInstrumentation struct {
-	ClusterID      string `json:"clusterId"`
-	Namespace      string `json:"namespace"`
-	WorkloadName   string `json:"workloadName"`
-	WorkloadKind   string `json:"workloadKind"`
-	Enabled        bool   `json:"enabled"`
-	Language       string `json:"language"`
-	ManualOverride bool   `json:"manualOverride"`
-	UpdatedAt      string `json:"updatedAt,omitempty"`
+	ClusterID            string `json:"clusterId"`
+	Namespace            string `json:"namespace"`
+	WorkloadName         string `json:"workloadName"`
+	WorkloadKind         string `json:"workloadKind"`
+	Enabled              bool   `json:"enabled"`
+	Language             string `json:"language"`
+	ManualOverride       bool   `json:"manualOverride"`
+	LastDetectedLanguage string `json:"lastDetectedLanguage"`
+	UpdatedAt            string `json:"updatedAt,omitempty"`
 }
 
 func workloadKey(clusterID, namespace, kind, name string) string {
@@ -40,17 +41,19 @@ func (s *Store) ensureWorkloadInstrumentationTable() {
 			enabled BOOLEAN DEFAULT false,
 			language VARCHAR(50),
 			manual_override BOOLEAN DEFAULT false,
+			last_detected_language VARCHAR(50),
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (cluster_id, namespace, workload_kind, workload_name)
 		)
 	`)
+	_, _ = s.db.Exec(`ALTER TABLE workload_instrumentation ADD COLUMN IF NOT EXISTS last_detected_language VARCHAR(50)`)
 }
 
 // GetWorkloadInstrumentations returns all stored workload instrumentation configs, optionally filtered by cluster.
 func (s *Store) GetWorkloadInstrumentations(clusterID string) ([]WorkloadInstrumentation, error) {
 	s.ensureWorkloadInstrumentationTable()
 	if s.postgresEnabled && s.db != nil {
-		query := `SELECT cluster_id, namespace, workload_name, workload_kind, enabled, language, manual_override, updated_at FROM workload_instrumentation`
+		query := `SELECT cluster_id, namespace, workload_name, workload_kind, enabled, language, manual_override, COALESCE(last_detected_language,''), updated_at FROM workload_instrumentation`
 		args := []interface{}{}
 		if clusterID != "" {
 			query += " WHERE cluster_id = $1"
@@ -65,7 +68,7 @@ func (s *Store) GetWorkloadInstrumentations(clusterID string) ([]WorkloadInstrum
 		for rows.Next() {
 			var item WorkloadInstrumentation
 			var updatedAt time.Time
-			if err := rows.Scan(&item.ClusterID, &item.Namespace, &item.WorkloadName, &item.WorkloadKind, &item.Enabled, &item.Language, &item.ManualOverride, &updatedAt); err == nil {
+			if err := rows.Scan(&item.ClusterID, &item.Namespace, &item.WorkloadName, &item.WorkloadKind, &item.Enabled, &item.Language, &item.ManualOverride, &item.LastDetectedLanguage, &updatedAt); err == nil {
 				item.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 				list = append(list, item)
 			}
@@ -108,14 +111,15 @@ func (s *Store) SaveWorkloadInstrumentation(item WorkloadInstrumentation) error 
 	s.ensureWorkloadInstrumentationTable()
 	if s.postgresEnabled && s.db != nil {
 		_, err := s.db.Exec(`
-			INSERT INTO workload_instrumentation (cluster_id, namespace, workload_name, workload_kind, enabled, language, manual_override, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+			INSERT INTO workload_instrumentation (cluster_id, namespace, workload_name, workload_kind, enabled, language, manual_override, last_detected_language, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
 			ON CONFLICT (cluster_id, namespace, workload_kind, workload_name) DO UPDATE SET
 				enabled = EXCLUDED.enabled,
 				language = EXCLUDED.language,
 				manual_override = EXCLUDED.manual_override,
+				last_detected_language = COALESCE(NULLIF(EXCLUDED.last_detected_language, ''), workload_instrumentation.last_detected_language),
 				updated_at = CURRENT_TIMESTAMP
-		`, item.ClusterID, item.Namespace, item.WorkloadName, item.WorkloadKind, item.Enabled, item.Language, item.ManualOverride)
+		`, item.ClusterID, item.Namespace, item.WorkloadName, item.WorkloadKind, item.Enabled, item.Language, item.ManualOverride, item.LastDetectedLanguage)
 		return err
 	}
 	list, _ := s.getWorkloadInstrumentationsFromMinIO("")
@@ -203,6 +207,48 @@ func (s *Store) IsWorkloadInstrumentationEnabled(clusterID, namespace, kind, nam
 
 // Cluster-scoped reported pods helpers.
 
+// RememberDetectedLanguage persists the latest agent-detected runtime for a
+// workload without touching manual language overrides or enabled state.
+func (s *Store) RememberDetectedLanguage(clusterID, namespace, kind, name, language string) error {
+	if clusterID == "" || namespace == "" || name == "" || !IsAssignedStack(language) {
+		return nil
+	}
+	if kind == "" {
+		kind = "Deployment"
+	}
+	s.ensureWorkloadInstrumentationTable()
+	if s.postgresEnabled && s.db != nil {
+		_, err := s.db.Exec(`
+			INSERT INTO workload_instrumentation (cluster_id, namespace, workload_name, workload_kind, enabled, language, manual_override, last_detected_language, updated_at)
+			VALUES ($1, $2, $3, $4, false, '', false, $5, CURRENT_TIMESTAMP)
+			ON CONFLICT (cluster_id, namespace, workload_kind, workload_name) DO UPDATE SET
+				last_detected_language = EXCLUDED.last_detected_language,
+				updated_at = CURRENT_TIMESTAMP
+		`, clusterID, namespace, name, kind, language)
+		return err
+	}
+	list, _ := s.getWorkloadInstrumentationsFromMinIO("")
+	key := workloadKey(clusterID, namespace, kind, name)
+	found := false
+	for i, existing := range list {
+		if workloadKey(existing.ClusterID, existing.Namespace, existing.WorkloadKind, existing.WorkloadName) == key {
+			list[i].LastDetectedLanguage = language
+			found = true
+			break
+		}
+	}
+	if !found {
+		list = append(list, WorkloadInstrumentation{
+			ClusterID:            clusterID,
+			Namespace:            namespace,
+			WorkloadName:         name,
+			WorkloadKind:         kind,
+			LastDetectedLanguage: language,
+		})
+	}
+	return s.saveWorkloadInstrumentationsToMinIO(list)
+}
+
 func (s *Store) SetReportedPodsForCluster(clusterID, ns string, pods []ReportedPod) {
 	s.reportedPodsMu.Lock()
 	defer s.reportedPodsMu.Unlock()
@@ -213,7 +259,10 @@ func (s *Store) SetReportedPodsForCluster(clusterID, ns string, pods []ReportedP
 	if clusterID == "" {
 		key = ns
 	}
-	s.reportedPods[key] = pods
+	prev := s.reportedPods[key]
+	copied := make([]ReportedPod, len(pods))
+	copy(copied, pods)
+	s.reportedPods[key] = mergePreservePodLanguage(prev, copied)
 }
 
 func (s *Store) GetReportedPodsForCluster(clusterID, ns string) []ReportedPod {

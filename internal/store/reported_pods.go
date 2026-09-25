@@ -59,6 +59,28 @@ func serviceNameFromPodName(name string) string {
 	return name
 }
 
+// mergePreservePodLanguage keeps a previously reported language when a fresh
+// sync omits it for the same pod name in the namespace.
+func mergePreservePodLanguage(prev, incoming []ReportedPod) []ReportedPod {
+	if len(prev) == 0 {
+		return incoming
+	}
+	prevLang := make(map[string]string, len(prev))
+	for _, p := range prev {
+		if p.Language != "" {
+			prevLang[p.Namespace+"/"+p.Name] = p.Language
+		}
+	}
+	for i := range incoming {
+		if incoming[i].Language == "" {
+			if lang, ok := prevLang[incoming[i].Namespace+"/"+incoming[i].Name]; ok {
+				incoming[i].Language = lang
+			}
+		}
+	}
+	return incoming
+}
+
 func (s *Store) SetReportedPods(ns string, pods []ReportedPod) {
 	s.reportedPodsMu.Lock()
 	defer s.reportedPodsMu.Unlock()

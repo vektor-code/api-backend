@@ -301,10 +301,24 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 		enabled := w.Instrumented
 		manualOverride := false
 		if hasCfg {
-			enabled = cfg.Enabled
 			manualOverride = cfg.ManualOverride
+			// RememberDetectedLanguage may insert cache-only rows (Enabled=false,
+			// Language empty). Those must not override live inject annotations.
+			// Trust Enabled only when Admin assigned a stack, flipped the toggle
+			// on, or set a manual override.
+			if cfg.ManualOverride || store.IsAssignedStack(cfg.Language) || cfg.Enabled {
+				enabled = cfg.Enabled
+			}
 		}
-		lang := w.Language
+		detected := w.Language
+		if detected == "" && hasCfg && cfg.LastDetectedLanguage != "" {
+			detected = cfg.LastDetectedLanguage
+		}
+		// Only persist freshly observed detection, not the fallback echo.
+		if w.Language != "" && store.IsAssignedStack(w.Language) {
+			_ = h.store.RememberDetectedLanguage(clusterID, namespace, w.Kind, w.Name, w.Language)
+		}
+		lang := detected
 		if hasCfg && store.IsAssignedStack(cfg.Language) {
 			lang = cfg.Language
 		}
@@ -315,7 +329,7 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 			"replicas":         w.Replicas,
 			"ready":            w.Ready,
 			"language":         lang,
-			"detectedLanguage": w.Language,
+			"detectedLanguage": detected,
 			"instrumented":     enabled,
 			"manualOverride":   manualOverride,
 			"details":          w.Details,
