@@ -213,13 +213,20 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 		}
 	}
 
-	// Fallback to agent-reported pods grouped by app label
+	// No live credentials: fall back to what the agent reported. Prefer the
+	// workloads it read straight off the Deployment/STS/DS status, since pod
+	// aggregation undercounts replicas whenever a pod is missing from the
+	// report (pending, evicted, or filtered).
 	if len(workloads) == 0 {
 		pods := h.store.GetReportedPodsForCluster(clusterID, namespace)
 		if len(pods) == 0 {
 			pods = h.store.GetReportedPods(namespace)
 		}
-		workloads = workloadsFromReportedPods(pods)
+		if reported := h.store.GetReportedWorkloadsForCluster(clusterID, namespace); len(reported) > 0 {
+			workloads = workloadsFromReportedWorkloads(reported, pods)
+		} else {
+			workloads = workloadsFromReportedPods(pods)
+		}
 	}
 
 	applications := make([]fiber.Map, 0, len(workloads))
@@ -270,6 +277,50 @@ func isDeadPodPhase(phase string) bool {
 	default:
 		return false
 	}
+}
+
+// workloadsFromReportedWorkloads converts agent-reported workloads into the
+// shape Admin renders. Replica/ready counts come from the workload itself; the
+// language, labels and instrumentation details only exist on pods, so they are
+// merged in from the matching reported pods of the same service.
+func workloadsFromReportedWorkloads(reported []store.ReportedWorkload, pods []store.ReportedPod) []k8s.WorkloadInfo {
+	result := make([]k8s.WorkloadInfo, 0, len(reported))
+	for _, w := range reported {
+		if w.Name == "" {
+			continue
+		}
+		info := k8s.WorkloadInfo{
+			Name:         w.Name,
+			Namespace:    w.Namespace,
+			Kind:         w.Kind,
+			Replicas:     w.Replicas,
+			Ready:        w.Ready,
+			Language:     w.Language,
+			Instrumented: w.Instrumented,
+		}
+		for _, p := range pods {
+			if p.Namespace != w.Namespace || !p.MatchesService(w.Name) {
+				continue
+			}
+			if info.Language == "" && p.Language != "" {
+				info.Language = p.Language
+			}
+			if p.Instrumented {
+				info.Instrumented = true
+			}
+			if info.Labels == nil && len(p.Labels) > 0 {
+				info.Labels = p.Labels
+			}
+			if info.Details == "" && p.Details != "" {
+				info.Details = p.Details
+			}
+			if p.IsFrontend {
+				info.IsFrontend = true
+			}
+		}
+		result = append(result, info)
+	}
+	return result
 }
 
 func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {

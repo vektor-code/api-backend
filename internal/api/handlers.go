@@ -1012,14 +1012,18 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 	clusterID := c.Query("cluster", "default")
 
 	if c.Method() == "POST" {
+		// reportedWorkloads = observed Deploy/STS/DS ready counts from the agent.
+		// Response "workloads" remains the operator instrumentation overrides.
 		var req struct {
-			Cluster          string                           `json:"cluster"`
-			AgentNamespace   string                           `json:"agentNamespace"`
-			Namespaces       []string                         `json:"namespaces"`
-			Pods             []store.ReportedPod              `json:"pods"`
-			Nodes            []store.ReportedNode             `json:"nodes"`
-			Instrumentations *[]store.ReportedInstrumentation `json:"instrumentations"`
-			PlatformHealth   *platformhealth.Report           `json:"platformHealth"`
+			Cluster            string                           `json:"cluster"`
+			AgentNamespace     string                           `json:"agentNamespace"`
+			Namespaces         []string                         `json:"namespaces"`
+			Pods               []store.ReportedPod              `json:"pods"`
+			Nodes              []store.ReportedNode             `json:"nodes"`
+			ReportedWorkloads  []store.ReportedWorkload         `json:"reportedWorkloads"`
+			Workloads          []store.ReportedWorkload         `json:"workloads"` // legacy alias
+			Instrumentations   *[]store.ReportedInstrumentation `json:"instrumentations"`
+			PlatformHealth     *platformhealth.Report           `json:"platformHealth"`
 		}
 		if err := c.BodyParser(&req); err == nil {
 			if req.Cluster != "" {
@@ -1047,6 +1051,25 @@ func (h *Handler) GetNamespaceConfig(c *fiber.Ctx) error {
 			for _, ns := range req.Namespaces {
 				if len(podsByNs[ns]) == 0 {
 					h.store.SetReportedPodsForCluster(clusterID, ns, nil)
+				}
+			}
+
+			workloadsByNs := make(map[string][]store.ReportedWorkload)
+			reported := req.ReportedWorkloads
+			if len(reported) == 0 {
+				reported = req.Workloads
+			}
+			for _, w := range reported {
+				workloadsByNs[w.Namespace] = append(workloadsByNs[w.Namespace], w)
+			}
+			for ns, workloads := range workloadsByNs {
+				h.store.SetReportedWorkloadsForCluster(clusterID, ns, workloads)
+			}
+			// Clear stale entries so a namespace whose workloads were all deleted
+			// falls back to pod aggregation instead of serving the last report.
+			for _, ns := range req.Namespaces {
+				if len(workloadsByNs[ns]) == 0 {
+					h.store.SetReportedWorkloadsForCluster(clusterID, ns, nil)
 				}
 			}
 			if len(req.Nodes) > 0 {

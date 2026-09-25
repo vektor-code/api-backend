@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/kubetrace/api-backend/internal/models"
 	"github.com/kubetrace/api-backend/internal/store"
+	"github.com/kubetrace/shared/w3c"
 	colpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -211,9 +212,22 @@ func convertSpan(pb *tracepb.Span, svc, ns, cluster, pod, node string) *models.S
 		})
 	}
 
+	traceID := fmt.Sprintf("%x", pb.TraceId)
+	spanID := fmt.Sprintf("%x", pb.SpanId)
+
+	// Persist the trace context from the span itself. The UI previously
+	// assembled a traceparent out of the stored IDs and a hardcoded "01",
+	// which is wrong whenever the span was not sampled and unparseable when an
+	// ID is short, so the header is captured here at ingest instead.
+	sampled := w3c.SampledFromOTLPFlags(pb.Flags)
+	if tp := w3c.FormatTraceparent(traceID, spanID, sampled); tp != "" {
+		attrs["w3c.traceparent"] = tp
+		attrs["w3c.trace_flags"] = w3c.TraceFlags(sampled)
+	}
+
 	span := &models.Span{
-		TraceID:      fmt.Sprintf("%x", pb.TraceId),
-		SpanID:       fmt.Sprintf("%x", pb.SpanId),
+		TraceID:      traceID,
+		SpanID:       spanID,
 		ParentSpanID: fmt.Sprintf("%x", pb.ParentSpanId),
 		Name:         pb.Name,
 		ServiceName:  svc,

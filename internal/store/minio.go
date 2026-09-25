@@ -64,6 +64,10 @@ type Store struct {
 	reportedNodes   map[string][]ReportedNode
 	reportedNodesMu sync.RWMutex
 
+	// Keyed by "<cluster>/<namespace>" like reportedPods.
+	reportedWorkloads   map[string][]ReportedWorkload
+	reportedWorkloadsMu sync.RWMutex
+
 	reportedInstrumentations   map[string][]ReportedInstrumentation
 	reportedInstrumentationsMu sync.RWMutex
 
