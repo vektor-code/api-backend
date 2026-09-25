@@ -5,13 +5,15 @@ package store
 // are authoritative — aggregating reported pods undercounts whenever a pod is
 // missing from the report, so Admin prefers these when present.
 type ReportedWorkload struct {
-	Name         string `json:"name"`
-	Namespace    string `json:"namespace"`
-	Kind         string `json:"kind"`
-	Replicas     int32  `json:"replicas"`
-	Ready        int32  `json:"ready"`
-	Language     string `json:"language"`
-	Instrumented bool   `json:"instrumented"`
+	Name          string `json:"name"`
+	Namespace     string `json:"namespace"`
+	Kind          string `json:"kind"`
+	Replicas      int32  `json:"replicas"`
+	Ready         int32  `json:"ready"`
+	Language      string `json:"language"`
+	Instrumented  bool   `json:"instrumented"`
+	StatusReason  string `json:"statusReason,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"`
 }
 
 // reportedWorkloadKey mirrors the cluster/namespace keying used for reported

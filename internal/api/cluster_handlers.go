@@ -256,6 +256,8 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 			"details":          w.Details,
 			"labels":           w.Labels,
 			"cluster":          clusterID,
+			"statusReason":     w.StatusReason,
+			"statusMessage":    w.StatusMessage,
 		})
 	}
 
@@ -290,13 +292,15 @@ func workloadsFromReportedWorkloads(reported []store.ReportedWorkload, pods []st
 			continue
 		}
 		info := k8s.WorkloadInfo{
-			Name:         w.Name,
-			Namespace:    w.Namespace,
-			Kind:         w.Kind,
-			Replicas:     w.Replicas,
-			Ready:        w.Ready,
-			Language:     w.Language,
-			Instrumented: w.Instrumented,
+			Name:          w.Name,
+			Namespace:     w.Namespace,
+			Kind:          w.Kind,
+			Replicas:      w.Replicas,
+			Ready:         w.Ready,
+			Language:      w.Language,
+			Instrumented:  w.Instrumented,
+			StatusReason:  w.StatusReason,
+			StatusMessage: w.StatusMessage,
 		}
 		for _, p := range pods {
 			if p.Namespace != w.Namespace || !p.MatchesService(w.Name) {
@@ -316,6 +320,11 @@ func workloadsFromReportedWorkloads(reported []store.ReportedWorkload, pods []st
 			}
 			if p.IsFrontend {
 				info.IsFrontend = true
+			}
+			if info.Ready < info.Replicas && p.StatusReason != "" {
+				info.StatusReason, info.StatusMessage = k8s.PickWorstStatus(
+					info.StatusReason, info.StatusMessage, p.StatusReason, p.StatusMessage,
+				)
 			}
 		}
 		result = append(result, info)
@@ -342,6 +351,11 @@ func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {
 			if existing.Language == "" && p.Language != "" {
 				existing.Language = p.Language
 			}
+			if !p.Ready && p.StatusReason != "" {
+				existing.StatusReason, existing.StatusMessage = k8s.PickWorstStatus(
+					existing.StatusReason, existing.StatusMessage, p.StatusReason, p.StatusMessage,
+				)
+			}
 			seen[key] = existing
 			continue
 		}
@@ -349,7 +363,7 @@ func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {
 		if p.Ready {
 			ready = 1
 		}
-		seen[key] = k8s.WorkloadInfo{
+		info := k8s.WorkloadInfo{
 			Name:         name,
 			Namespace:    p.Namespace,
 			Kind:         "Deployment",
@@ -361,6 +375,11 @@ func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {
 			Details:      p.Details,
 			IsFrontend:   p.IsFrontend,
 		}
+		if !p.Ready {
+			info.StatusReason = p.StatusReason
+			info.StatusMessage = p.StatusMessage
+		}
+		seen[key] = info
 	}
 	result := make([]k8s.WorkloadInfo, 0, len(seen))
 	for _, w := range seen {

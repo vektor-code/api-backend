@@ -6,6 +6,32 @@ import (
 	"github.com/kubetrace/api-backend/internal/store"
 )
 
+func TestWorkloadsFromReportedWorkloadsMergesStatusReason(t *testing.T) {
+	reported := []store.ReportedWorkload{
+		{Name: "api", Namespace: "dev", Kind: "Deployment", Replicas: 1, Ready: 0},
+	}
+	pods := []store.ReportedPod{
+		{
+			Namespace:     "dev",
+			Name:          "api-abc-xyz",
+			Labels:        map[string]string{"app.kubernetes.io/name": "api"},
+			StatusReason:  "ImagePullBackOff",
+			StatusMessage: "not found",
+			Ready:         false,
+		},
+	}
+	workloads := workloadsFromReportedWorkloads(reported, pods)
+	if len(workloads) != 1 {
+		t.Fatalf("got %d workloads", len(workloads))
+	}
+	if workloads[0].StatusReason != "ImagePullBackOff" {
+		t.Fatalf("StatusReason = %q, want ImagePullBackOff", workloads[0].StatusReason)
+	}
+	if workloads[0].StatusMessage != "not found" {
+		t.Fatalf("StatusMessage = %q", workloads[0].StatusMessage)
+	}
+}
+
 func TestWorkloadsFromReportedPodsPrefersNonEmptyLanguage(t *testing.T) {
 	pods := []store.ReportedPod{
 		{

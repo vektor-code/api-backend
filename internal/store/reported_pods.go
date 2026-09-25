@@ -16,6 +16,8 @@ type ReportedPod struct {
 	MemoryLimit         float64           `json:"memoryLimit"`
 	RestartCount        int               `json:"restartCount"`
 	Ready               bool              `json:"ready"`
+	StatusReason        string            `json:"statusReason,omitempty"`
+	StatusMessage       string            `json:"statusMessage,omitempty"`
 	Language            string            `json:"language"`
 	Instrumented        bool              `json:"instrumented"`
 	InstrumentationType string            `json:"instrumentationType"`

@@ -29,6 +29,9 @@ type WorkloadInfo struct {
 	Labels       map[string]string `json:"labels"`
 	Details      string            `json:"details"`
 	IsFrontend   bool              `json:"isFrontend"`
+	// StatusReason / StatusMessage explain non-ready pods (ImagePullBackOff, …).
+	StatusReason  string `json:"statusReason,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"`
 }
 
 // BuildRestConfig creates a rest.Config from a host and credentials (kubeconfig YAML or bearer token).
@@ -135,7 +138,41 @@ func ListWorkloadsInNamespace(ctx context.Context, client kubernetes.Interface, 
 		workloads = append(workloads, workloadFromTemplate(d.Name, namespace, "DaemonSet", &replicas, d.Status.NumberReady, d.Spec.Template))
 	}
 
+	// Attach container waiting/terminated reasons from live pods so Admin can
+	// explain why Ready is 0 (image pull, crash loop) instead of only showing 0/N.
+	_ = attachWorkloadPodStatus(ctx, client, namespace, workloads)
+
 	return workloads, nil
+}
+
+// attachWorkloadPodStatus merges the worst non-ready container hint onto each
+// workload that is below its desired Ready count.
+func attachWorkloadPodStatus(ctx context.Context, client kubernetes.Interface, namespace string, workloads []WorkloadInfo) error {
+	if client == nil || len(workloads) == 0 {
+		return nil
+	}
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range workloads {
+		w := &workloads[i]
+		if w.Ready >= w.Replicas && w.Replicas > 0 {
+			continue
+		}
+		for j := range pods.Items {
+			pod := &pods.Items[j]
+			if !podBelongsToWorkload(pod.Name, w.Name) {
+				continue
+			}
+			reason, message := PodStatusHint(pod)
+			if reason == "" {
+				continue
+			}
+			w.StatusReason, w.StatusMessage = PickWorstStatus(w.StatusReason, w.StatusMessage, reason, message)
+		}
+	}
+	return nil
 }
 
 func containerImagesAndCommands(containers []corev1.Container) (images, commands []string) {
