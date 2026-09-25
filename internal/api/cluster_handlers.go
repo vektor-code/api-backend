@@ -267,21 +267,31 @@ func workloadsFromReportedPods(pods []store.ReportedPod) []k8s.WorkloadInfo {
 	seen := make(map[string]k8s.WorkloadInfo)
 	for _, p := range pods {
 		name := p.ServiceName()
-		key := name
+		key := p.Namespace + "/" + name
 		if existing, ok := seen[key]; ok {
 			existing.Replicas++
+			if p.Ready {
+				existing.Ready++
+			}
 			if p.Instrumented {
 				existing.Instrumented = true
 			}
+			if existing.Language == "" && p.Language != "" {
+				existing.Language = p.Language
+			}
 			seen[key] = existing
 			continue
+		}
+		var ready int32
+		if p.Ready {
+			ready = 1
 		}
 		seen[key] = k8s.WorkloadInfo{
 			Name:         name,
 			Namespace:    p.Namespace,
 			Kind:         "Deployment",
 			Replicas:     1,
-			Ready:        1,
+			Ready:        ready,
 			Language:     p.Language,
 			Instrumented: p.Instrumented,
 			Labels:       p.Labels,

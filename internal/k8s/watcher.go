@@ -258,11 +258,7 @@ func getPodApp(p *corev1.Pod) string {
 }
 
 func isFrontendPod(p *corev1.Pod) bool {
-	return isStaticHTTPStack(detectLanguage(p))
-}
-
-func detectLanguage(p *corev1.Pod) string {
-	return detectLanguageFromPodSpec(p)
+	return isStaticHTTPStack(detectLanguage(p, ""))
 }
 
 func detectInstrumentation(p *corev1.Pod) (bool, string, string) {
@@ -320,7 +316,7 @@ func podToInfo(p *corev1.Pod) *PodInfo {
 		Labels:              labels,
 		Phase:               string(p.Status.Phase),
 		AppName:             getPodApp(p),
-		Language:            detectLanguage(p),
+		Language:            detectLanguage(p, ""),
 		Instrumented:        instr,
 		InstrumentationType: instrType,
 		Details:             details,

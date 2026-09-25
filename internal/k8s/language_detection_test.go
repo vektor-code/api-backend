@@ -48,16 +48,116 @@ func TestDetectApacheHttpdFromImage(t *testing.T) {
 	}
 }
 
-func TestInjectSDKAnnotationDoesNotUseCRName(t *testing.T) {
+func TestInjectAnnotationIsNotDetection(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
-				"instrumentation.opentelemetry.io/inject-sdk": "troni-dev-instrumentation",
+				"instrumentation.opentelemetry.io/inject-sdk":  "troni-dev-instrumentation",
+				"instrumentation.opentelemetry.io/inject-java": "ns-instrumentation",
 			},
 		},
 	}
-	if got := detectLanguageFromPodSpec(pod); got != "sdk" {
-		t.Fatalf("detectLanguageFromPodSpec() = %q, want sdk", got)
+	if got := detectLanguageFromPodSpec(pod); got != "" {
+		t.Fatalf("detectLanguageFromPodSpec() = %q, want empty (inject-* is not detection)", got)
+	}
+}
+
+func TestOpaqueImageNotDetectedFromName(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-frontend-abc"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "app-frontend",
+				Image: "registry.ext.cloudraft.net:18001/development/code/4sim-website/app-frontend:dev-388",
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "" {
+		t.Fatalf("opaque private image must not invent a stack from the tag, got %q", got)
+	}
+}
+
+func TestProcessCmdlineDetectsOpaqueNginx(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "registry.example/app-frontend:dev-1",
+			}},
+		},
+	}
+	cmdline := "nginx: master process nginx -g daemon off;"
+	if got := detectLanguage(pod, cmdline); got != "nginx" {
+		t.Fatalf("detectLanguage() = %q, want nginx", got)
+	}
+}
+
+func TestProcessCmdlineDetectsOpaqueJava(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "registry.example/auth-backend:dev-1",
+			}},
+		},
+	}
+	if got := detectLanguage(pod, "java -Xms128m -Xmx512m -jar /app/app.jar"); got != "java" {
+		t.Fatalf("detectLanguage() = %q, want java", got)
+	}
+}
+
+func TestProcessCmdlineDetectsOpaquePython(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "registry.example/admin-backend:dev-1",
+			}},
+		},
+	}
+	if got := detectLanguage(pod, "/usr/local/bin/python3.12 /usr/local/bin/uvicorn app.main:app --host 0.0.0.0"); got != "python" {
+		t.Fatalf("detectLanguage() = %q, want python", got)
+	}
+}
+
+func TestProcessBeatsWrongInjectAnnotation(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"instrumentation.opentelemetry.io/inject-nodejs": "ns-instrumentation",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "registry.example/app-frontend:dev-1",
+			}},
+		},
+	}
+	if got := detectLanguage(pod, "nginx: master process nginx -g daemon off;"); got != "nginx" {
+		t.Fatalf("detectLanguage() = %q, want nginx (process beats inject)", got)
+	}
+}
+
+func TestNextServerCmdlineNodejs(t *testing.T) {
+	if got := languageFromProcessCmdline("next-server (v16.2.4)"); got != "nodejs" {
+		t.Fatalf("languageFromProcessCmdline() = %q, want nodejs", got)
+	}
+}
+
+func TestLanguageFromProcessCmdline(t *testing.T) {
+	cases := []struct {
+		cmdline, want string
+	}{
+		{"nginx: master process nginx -g daemon off;", "nginx"},
+		{"java -jar /app/app.jar", "java"},
+		{"sh -c java $JAVA_OPTS -jar /app/app.jar", "java"},
+		{"/usr/local/bin/python3.11 /usr/local/bin/gunicorn --bind 0.0.0.0:80 app:app", "python"},
+		{"npm run start:prod", "nodejs"},
+		{"next-server (v16.2.4)", "nodejs"},
+		{"/venv/bin/uwsgi --ini /code/uwsgi.ini", "python"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := languageFromProcessCmdline(tc.cmdline); got != tc.want {
+			t.Errorf("languageFromProcessCmdline(%q) = %q, want %q", tc.cmdline, got, tc.want)
+		}
 	}
 }
 
@@ -188,5 +288,19 @@ func TestCommandBeatsWrongImage(t *testing.T) {
 	}
 	if got := detectLanguageFromPodSpec(pod); got != "nodejs" {
 		t.Fatalf("got %q, want nodejs", got)
+	}
+}
+
+func TestPodNameIsNotDetection(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "java-worker-xyz"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Image: "registry.example/custom:1",
+			}},
+		},
+	}
+	if got := detectLanguageFromPodSpec(pod); got != "" {
+		t.Fatalf("pod name must not invent a stack, got %q", got)
 	}
 }

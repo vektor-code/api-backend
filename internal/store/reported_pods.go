@@ -15,6 +15,7 @@ type ReportedPod struct {
 	MemoryUsage         float64           `json:"memoryUsage"`
 	MemoryLimit         float64           `json:"memoryLimit"`
 	RestartCount        int               `json:"restartCount"`
+	Ready               bool              `json:"ready"`
 	Language            string            `json:"language"`
 	Instrumented        bool              `json:"instrumented"`
 	InstrumentationType string            `json:"instrumentationType"`
@@ -88,14 +89,19 @@ func (s *Store) GetReportedLanguageForService(namespace, serviceName string) str
 		return ""
 	}
 	pods := s.reportedPods[namespace]
+	var fallback string
 	for _, p := range pods {
-		if p.MatchesService(serviceName) {
-			if IsAssignedStack(p.Language) {
-				return p.Language
-			}
+		if !p.MatchesService(serviceName) {
+			continue
+		}
+		if IsAssignedStack(p.Language) {
+			return p.Language
+		}
+		if p.Language != "" && fallback == "" {
+			fallback = p.Language
 		}
 	}
-	return ""
+	return fallback
 }
 
 func (s *Store) GetReportedDatabaseForService(namespace, serviceName string) string {
