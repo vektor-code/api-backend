@@ -37,16 +37,36 @@ func clusterHost(item store.ClusterInventoryItem) string {
 }
 
 func maskClusterInventoryItem(item store.ClusterInventoryItem) fiber.Map {
+	// Agent-managed clusters intentionally have no central kubeconfig/token —
+	// the agent uses an in-cluster ServiceAccount + ClusterRole. Treating an
+	// empty Token as "missing credentials" made Admin show a false red "Not set".
+	agentManaged := item.ManagedByAgent || strings.EqualFold(item.CredentialType, "agent")
+	credType := item.CredentialType
+	if credType == "" {
+		if agentManaged {
+			credType = "agent"
+		} else {
+			credType = "kubeconfig"
+		}
+	}
+	accessMode := "none"
+	switch {
+	case agentManaged:
+		accessMode = "agent"
+	case item.Token != "":
+		accessMode = credType
+	}
 	return fiber.Map{
 		"id":             item.ID,
 		"displayName":    item.DisplayName,
 		"token":          item.Token,
-		"hasCredentials": item.Token != "",
+		"hasCredentials": item.Token != "" || agentManaged,
 		"status":         item.Status,
-		"credentialType": item.CredentialType,
+		"credentialType": credType,
 		"apiServer":      item.APIServer,
 		"agentNamespace": item.AgentNamespace,
-		"managedByAgent": item.ManagedByAgent,
+		"managedByAgent": agentManaged,
+		"accessMode":     accessMode,
 	}
 }
 
@@ -74,7 +94,36 @@ func (h *Handler) TestClusterConnection(c *fiber.Ctx) error {
 			}
 		}
 	}
+
+	// No central credentials: agent clusters prove reachability via heartbeat
+	// (in-cluster ClusterRole), not a kubeconfig dial from api-backend.
 	if token == "" {
+		if ok, detail := h.agentClusterTestResult(req.ID, req.CredentialType); ok {
+			return c.JSON(fiber.Map{
+				"success":       true,
+				"serverVersion": "agent",
+				"message":       detail,
+				"mode":          "agent",
+			})
+		}
+		if req.ID != "" {
+			if existing, err := h.store.GetClusterByID(req.ID); err == nil {
+				if existing.ManagedByAgent || strings.EqualFold(existing.CredentialType, "agent") {
+					return c.JSON(fiber.Map{
+						"success": false,
+						"error":   "Agent is registered but not reporting (heartbeat older than 2 minutes)",
+						"mode":    "agent",
+					})
+				}
+			}
+			if strings.EqualFold(req.CredentialType, "agent") {
+				return c.JSON(fiber.Map{
+					"success": false,
+					"error":   "Agent is registered but not reporting (heartbeat older than 2 minutes)",
+					"mode":    "agent",
+				})
+			}
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Credentials are required"})
 	}
 
@@ -94,7 +143,23 @@ func (h *Handler) TestClusterConnection(c *fiber.Ctx) error {
 		"success":       true,
 		"serverVersion": version,
 		"message":       "Successfully connected to Kubernetes API",
+		"mode":          "token",
 	})
+}
+
+// agentClusterTestResult returns true when the cluster has a live agent heartbeat.
+func (h *Handler) agentClusterTestResult(clusterID, credentialType string) (bool, string) {
+	if clusterID == "" && !strings.EqualFold(credentialType, "agent") {
+		return false, ""
+	}
+	if clusterID != "" && h.store.IsAgentManagedCluster(clusterID) {
+		ns := h.store.GetAgentNamespaceForCluster(clusterID)
+		if ns == "" {
+			ns = "unknown"
+		}
+		return true, "Agent heartbeat healthy (in-cluster ClusterRole); namespace " + ns
+	}
+	return false, ""
 }
 
 // DELETE /api/admin/clusters/:id

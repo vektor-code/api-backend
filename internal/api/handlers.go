@@ -1202,6 +1202,21 @@ func (h *Handler) GetClusterInventory(c *fiber.Ctx) error {
 			})
 		}
 	}
+	// Live heartbeat wins over stale inventory flags (Postgres may drop managedByAgent).
+	for i := range inv {
+		if h.store.IsAgentManagedCluster(inv[i].ID) {
+			inv[i].ManagedByAgent = true
+			if inv[i].CredentialType == "" || (inv[i].CredentialType == "kubeconfig" && inv[i].Token == "") {
+				inv[i].CredentialType = "agent"
+			}
+			if inv[i].AgentNamespace == "" {
+				inv[i].AgentNamespace = h.store.GetAgentNamespaceForCluster(inv[i].ID)
+			}
+		} else if inv[i].CredentialType == "agent" || inv[i].ManagedByAgent {
+			inv[i].ManagedByAgent = true
+			inv[i].CredentialType = "agent"
+		}
+	}
 	// Deduplicate and drop stale default placeholder when agent cluster exists.
 	hasAgent := false
 	for _, item := range inv {
