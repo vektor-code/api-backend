@@ -322,7 +322,7 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 		if hasCfg && store.IsAssignedStack(cfg.Language) {
 			lang = cfg.Language
 		}
-		applications = append(applications, fiber.Map{
+		app := fiber.Map{
 			"name":             w.Name,
 			"namespace":        w.Namespace,
 			"kind":             w.Kind,
@@ -337,7 +337,15 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 			"cluster":          clusterID,
 			"statusReason":     w.StatusReason,
 			"statusMessage":    w.StatusMessage,
-		})
+		}
+		if strings.EqualFold(lang, "nginx") || strings.EqualFold(detected, "nginx") {
+			app["nginxVersion"] = w.NginxVersion
+			app["injectCompatible"] = w.InjectCompatible
+			if w.InjectBlockedReason != "" {
+				app["injectBlockedReason"] = w.InjectBlockedReason
+			}
+		}
+		applications = append(applications, app)
 	}
 
 	sort.Slice(applications, func(i, j int) bool {
@@ -497,6 +505,10 @@ func (h *Handler) ToggleApplicationInstrumentation(c *fiber.Ctx) error {
 
 	resolvedLang := req.Language
 	if cluster.Token != "" && cluster.Status == "Active" {
+		restConfig, err := k8s.BuildRestConfig(clusterHost(*cluster), cluster.Token)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Failed to connect to cluster: " + err.Error()})
+		}
 		client, dynClient, err := k8s.BuildClientsForCluster(clusterHost(*cluster), cluster.Token)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to connect to cluster: " + err.Error()})
@@ -519,7 +531,7 @@ func (h *Handler) ToggleApplicationInstrumentation(c *fiber.Ctx) error {
 			}
 		}
 
-		detectedLang, err := k8s.ApplyWorkloadInstrumentation(c.Context(), client, req.ClusterID, req.Namespace, req.WorkloadName, req.WorkloadKind, req.Language, agentNs, req.Enabled)
+		detectedLang, err := k8s.ApplyWorkloadInstrumentation(c.Context(), client, restConfig, req.ClusterID, req.Namespace, req.WorkloadName, req.WorkloadKind, req.Language, agentNs, req.Enabled)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed to patch workload: " + err.Error()})
 		}

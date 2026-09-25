@@ -32,6 +32,10 @@ type WorkloadInfo struct {
 	// StatusReason / StatusMessage explain non-ready pods (ImagePullBackOff, …).
 	StatusReason  string `json:"statusReason,omitempty"`
 	StatusMessage string `json:"statusMessage,omitempty"`
+	// NginxVersion / inject fields apply when Language is nginx.
+	NginxVersion        string `json:"nginxVersion,omitempty"`
+	InjectCompatible    bool   `json:"injectCompatible,omitempty"`
+	InjectBlockedReason string `json:"injectBlockedReason,omitempty"`
 }
 
 // BuildRestConfig creates a rest.Config from a host and credentials (kubeconfig YAML or bearer token).
@@ -221,7 +225,7 @@ func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready i
 	}
 	lang := detectLanguageFromPodSpec(pod)
 	instr, _, details := detectInstrumentation(pod)
-	return WorkloadInfo{
+	info := WorkloadInfo{
 		Name:         name,
 		Namespace:    namespace,
 		Kind:         kind,
@@ -233,6 +237,8 @@ func workloadFromTemplate(name, namespace, kind string, replicas *int32, ready i
 		Details:      details,
 		IsFrontend:   isStaticHTTPStack(lang),
 	}
+	enrichNginxInjectStatus(&info, template.Spec.Containers)
+	return info
 }
 
 func derefInt32(v *int32) int32 {
@@ -244,7 +250,7 @@ func derefInt32(v *int32) int32 {
 
 // ApplyWorkloadInstrumentation patches a workload to enable or disable OTel injection.
 // It returns the resolved language stack and any error.
-func ApplyWorkloadInstrumentation(ctx context.Context, client kubernetes.Interface, clusterID, namespace, workloadName, kind, language, agentNamespace string, enabled bool) (string, error) {
+func ApplyWorkloadInstrumentation(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, clusterID, namespace, workloadName, kind, language, agentNamespace string, enabled bool) (string, error) {
 	if agentNamespace == "" {
 		agentNamespace = AgentNamespaceFallback()
 	}
@@ -256,11 +262,11 @@ func ApplyWorkloadInstrumentation(ctx context.Context, client kubernetes.Interfa
 
 	switch kind {
 	case "Deployment":
-		return patchDeployment(ctx, client, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
+		return patchDeployment(ctx, client, restConfig, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
 	case "StatefulSet":
-		return patchStatefulSet(ctx, client, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
+		return patchStatefulSet(ctx, client, restConfig, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
 	case "DaemonSet":
-		return patchDaemonSet(ctx, client, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
+		return patchDaemonSet(ctx, client, restConfig, namespace, workloadName, language, instrumentationName, endpoint, clusterID, enabled)
 	default:
 		return "", fmt.Errorf("unsupported workload kind: %s", kind)
 	}
@@ -277,7 +283,7 @@ func detectLanguageFromPodTemplate(template *corev1.PodTemplateSpec) string {
 	return detectLanguageFromPodSpec(pod)
 }
 
-func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
+func patchDeployment(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
 	deploy, err := client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
@@ -286,12 +292,15 @@ func patchDeployment(ctx context.Context, client kubernetes.Interface, namespace
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument Deployment %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
+	if err := checkNginxInjectAllowed(ctx, client, restConfig, namespace, &deploy.Spec.Template, resolvedLang, enabled); err != nil {
+		return "", err
+	}
 	patchPodTemplate(&deploy.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 	return resolvedLang, err
 }
 
-func patchStatefulSet(ctx context.Context, client kubernetes.Interface, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
+func patchStatefulSet(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
 	sts, err := client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
@@ -300,12 +309,15 @@ func patchStatefulSet(ctx context.Context, client kubernetes.Interface, namespac
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument StatefulSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
+	if err := checkNginxInjectAllowed(ctx, client, restConfig, namespace, &sts.Spec.Template, resolvedLang, enabled); err != nil {
+		return "", err
+	}
 	patchPodTemplate(&sts.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
 	return resolvedLang, err
 }
 
-func patchDaemonSet(ctx context.Context, client kubernetes.Interface, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
+func patchDaemonSet(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace, name, language, instrumentationName, endpoint, clusterID string, enabled bool) (string, error) {
 	ds, err := client.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", err
@@ -314,9 +326,32 @@ func patchDaemonSet(ctx context.Context, client kubernetes.Interface, namespace,
 	if enabled && normalizeInjectLanguage(resolvedLang) == "" {
 		return "", fmt.Errorf("cannot auto-instrument DaemonSet %s/%s: language could not be detected — please select a tech stack (Go, NodeJS, Python, Java, .NET, PHP, nginx) first", namespace, name)
 	}
+	if err := checkNginxInjectAllowed(ctx, client, restConfig, namespace, &ds.Spec.Template, resolvedLang, enabled); err != nil {
+		return "", err
+	}
 	patchPodTemplate(&ds.Spec.Template, resolvedLang, instrumentationName, endpoint, namespace, clusterID, name, enabled)
 	_, err = client.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
 	return resolvedLang, err
+}
+
+func checkNginxInjectAllowed(ctx context.Context, client kubernetes.Interface, restConfig *rest.Config, namespace string, template *corev1.PodTemplateSpec, resolvedLang string, enabled bool) error {
+	if !enabled || normalizeInjectLanguage(resolvedLang) != "nginx" || template == nil {
+		return nil
+	}
+	probed := ResolveNginxVersion(ctx, client, restConfig, namespace, template)
+	return validateNginxInject(template.Spec.Containers, probed)
+}
+
+func enrichNginxInjectStatus(info *WorkloadInfo, containers []corev1.Container) {
+	if info == nil || strings.ToLower(strings.TrimSpace(info.Language)) != "nginx" {
+		return
+	}
+	version, compatible, blockedReason := NginxInjectStatus(containers, "")
+	info.NginxVersion = version
+	info.InjectCompatible = compatible
+	if !compatible {
+		info.InjectBlockedReason = blockedReason
+	}
 }
 
 func patchPodTemplate(template *corev1.PodTemplateSpec, language, instrumentationName, endpoint, namespace, clusterID, workloadName string, enabled bool) {
