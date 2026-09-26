@@ -34,9 +34,10 @@ const (
 	// Window used for service statistics aggregation.
 	chStatsWindow = time.Hour
 
-	// When retention is unlimited, keep default queries bounded unless the UI
-	// sends an explicit startTime. This keeps "forever" storage cheap to operate.
-	chDefaultForeverQueryHours = 168
+	// When retention is unlimited (retentionHours=0), list/aggregate queries without
+	// an explicit startTime must not scan the full table. A week-long default caused
+	// 12–25s latency on /api/traces and /api/endpoints; 1h matches the UI window.
+	chDefaultForeverQueryHours = 1
 )
 
 var chHTTPClient = &http.Client{
@@ -245,6 +246,26 @@ func chRootTransactionNameExpr() string {
 
 func chOperationHaving(operation string) string {
 	return fmt.Sprintf("positionCaseInsensitive(%s, '%s') > 0", chRootTransactionNameExpr(), chEscape(operation))
+}
+
+// chWherePrune adds span-level WHERE predicates to shrink partitions before
+// trace-level GROUP BY / HAVING. HAVING still enforces cross-span semantics;
+// these filters only drop obvious non-matches early.
+func chWherePrune(q *models.SearchQuery) []string {
+	if q == nil {
+		return nil
+	}
+	var prune []string
+	if q.Namespace != "" {
+		prune = append(prune, fmt.Sprintf("namespace = '%s'", chEscape(q.Namespace)))
+	}
+	if q.ServiceName != "" {
+		target := strings.ToLower(q.ServiceName)
+		if strings.Index(target, "(") == -1 {
+			prune = append(prune, fmt.Sprintf("lowerUTF8(service_name) = '%s'", chEscape(target)))
+		}
+	}
+	return prune
 }
 
 func (s *Store) chQueryBounds(q *models.SearchQuery, now time.Time) (time.Time, time.Time) {
@@ -536,6 +557,7 @@ func (s *Store) chSearchTraces(q *models.SearchQuery) ([]*models.TraceListItem, 
 	if q.TraceID != "" {
 		where = append(where, chTraceIDPredicate(q.TraceID))
 	}
+	where = append(where, chWherePrune(q)...)
 
 	var having []string
 	if q.Namespace != "" {
@@ -667,6 +689,7 @@ func (s *Store) chEndpointFilters(q *models.SearchQuery) (where []string, having
 	if q.TraceID != "" {
 		where = append(where, chTraceIDPredicate(q.TraceID))
 	}
+	where = append(where, chWherePrune(q)...)
 
 	if q.Namespace != "" {
 		having = append(having, fmt.Sprintf("countIf(namespace = '%s') > 0", chEscape(q.Namespace)))
