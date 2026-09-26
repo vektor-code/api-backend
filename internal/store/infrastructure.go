@@ -66,6 +66,12 @@ type InfraNode struct {
 	Region           string  `json:"region,omitempty"`
 	Zone             string  `json:"zone,omitempty"`
 	InstanceType     string  `json:"instanceType,omitempty"`
+	OperatingSystem  string  `json:"operatingSystem,omitempty"`
+	OsImage          string  `json:"osImage,omitempty"`
+	KernelVersion    string  `json:"kernelVersion,omitempty"`
+	Architecture     string  `json:"architecture,omitempty"`
+	ContainerRuntime string  `json:"containerRuntime,omitempty"`
+	KubeletVersion   string  `json:"kubeletVersion,omitempty"`
 }
 
 // InfraSummary is the cluster-wide rollup for the header tiles.
@@ -134,6 +140,12 @@ func (s *Store) GetInfrastructureMetrics(namespace string, allowedNs []string) *
 			Region:           rn.Region,
 			Zone:             rn.Zone,
 			InstanceType:     rn.InstanceType,
+			OperatingSystem:  rn.OperatingSystem,
+			OsImage:          rn.OsImage,
+			KernelVersion:    rn.KernelVersion,
+			Architecture:     rn.Architecture,
+			ContainerRuntime: rn.ContainerRuntime,
+			KubeletVersion:   rn.KubeletVersion,
 		}
 		out.Summary.CpuCapacity += rn.CpuCapacity
 		out.Summary.CpuAllocatable += rn.CpuAllocatable
@@ -330,6 +342,12 @@ func dedupeReportedNodes(nodes []ReportedNode) []ReportedNode {
 		current.Region = firstNonEmpty(current.Region, node.Region)
 		current.Zone = firstNonEmpty(current.Zone, node.Zone)
 		current.InstanceType = firstNonEmpty(current.InstanceType, node.InstanceType)
+		current.OperatingSystem = firstNonEmpty(current.OperatingSystem, node.OperatingSystem)
+		current.OsImage = firstNonEmpty(current.OsImage, node.OsImage)
+		current.KernelVersion = firstNonEmpty(current.KernelVersion, node.KernelVersion)
+		current.Architecture = firstNonEmpty(current.Architecture, node.Architecture)
+		current.ContainerRuntime = firstNonEmpty(current.ContainerRuntime, node.ContainerRuntime)
+		current.KubeletVersion = firstNonEmpty(current.KubeletVersion, node.KubeletVersion)
 		current.CpuAllocatable = maxFloat(current.CpuAllocatable, node.CpuAllocatable)
 		current.MemoryCapacity = maxFloat(current.MemoryCapacity, node.MemoryCapacity)
 		current.MemoryAllocatable = maxFloat(current.MemoryAllocatable, node.MemoryAllocatable)

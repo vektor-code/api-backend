@@ -16,6 +16,12 @@ type ReportedNode struct {
 	Region            string  `json:"region,omitempty"`
 	Zone              string  `json:"zone,omitempty"`
 	InstanceType      string  `json:"instanceType,omitempty"`
+	OperatingSystem   string  `json:"operatingSystem,omitempty"`
+	OsImage           string  `json:"osImage,omitempty"`
+	KernelVersion     string  `json:"kernelVersion,omitempty"`
+	Architecture      string  `json:"architecture,omitempty"`
+	ContainerRuntime  string  `json:"containerRuntime,omitempty"`
+	KubeletVersion    string  `json:"kubeletVersion,omitempty"`
 }
 
 func (s *Store) SetReportedNodes(nodes []ReportedNode) {
