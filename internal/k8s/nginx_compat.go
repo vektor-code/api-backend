@@ -8,31 +8,38 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// nginxAgentRelease maps an autoinstrumentation-apache-httpd image tag to the
-// ngx_http_opentelemetry_module.so builds it ships under
+// nginxAgentRelease maps an autoinstrumentation-apache-httpd (or CRNET instrumentation-nginx)
+// image tag to ngx_http_opentelemetry_module.so builds under
 // /opt/opentelemetry/WebServerModule/Nginx/{version}/.
 //
 // Upstream OTel does NOT publish “newer inject for newer nginx” on demand —
 // each agent image is a fixed set of prebuilt modules. Verified for :1.0.4
-// (2026-09): only 1.24.0 and 1.25.3. Official docs historically listed even
-// fewer. When a workload runs nginx 1.31.x the operator still requests
-// Nginx/1.31.4/... and dlopen fails → CrashLoop (highping incident).
+// (2026-09): only 1.24.0 and 1.25.3. CRNET ships crnet-1.1.0 with the expanded
+// matrix in nginx-agent/version.properties (includes highping 1.31.4).
 //
 // Best options when the app nginx is ahead of the agent image:
 //  1. Rebuild the app on a supported nginx (e.g. 1.25.3) — safest.
-//  2. Point OTEL_NGINX_IMAGE at a custom image that includes the needed module.
+//  2. Point OTEL_NGINX_IMAGE at CRNET instrumentation-nginx (or a custom build).
 //  3. Leave inject off (HTTP tracing via upstream services still works).
+//
+// Alpine/musl nginx cannot load these glibc-built modules.
 type nginxAgentRelease struct {
 	Tag     string
 	Modules []string
 }
 
-var knownNginxAgentReleases = []nginxAgentRelease{
-	{Tag: "1.0.4", Modules: []string{"1.24.0", "1.25.3"}},
+// crnetNginxModuleVersions must stay in sync with nginx-agent/version.properties.
+var crnetNginxModuleVersions = []string{
+	"1.24.0", "1.25.3", "1.25.5", "1.26.0", "1.26.2",
+	"1.27.3", "1.27.4", "1.28.0", "1.29.0", "1.30.0", "1.31.0", "1.31.4",
 }
 
-// SupportedNginxModuleVersions is the module set for the currently configured
-// agent image (OTEL_NGINX_IMAGE), defaulting to 1.0.4.
+var knownNginxAgentReleases = []nginxAgentRelease{
+	{Tag: "1.0.4", Modules: []string{"1.24.0", "1.25.3"}},
+	{Tag: "crnet-1.1.0", Modules: crnetNginxModuleVersions},
+}
+
+// SupportedNginxModuleVersions is the module set for OTEL_NGINX_IMAGE at process start.
 var SupportedNginxModuleVersions = modulesForConfiguredNginxAgent()
 
 var (
@@ -44,8 +51,39 @@ func configuredNginxAgentImage() string {
 	return envOr("OTEL_NGINX_IMAGE", "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd:1.0.4")
 }
 
-func modulesForConfiguredNginxAgent() []string {
-	img := configuredNginxAgentImage()
+func configuredApacheAgentImage() string {
+	return envOr("OTEL_APACHE_IMAGE", configuredNginxAgentImage())
+}
+
+func isCrnetWebserverAgentImage(img string) bool {
+	// Only tags that advertise the fat matrix (crnet-1.1.0). Smoke builds of
+	// instrumentation-nginx:dev still only ship upstream 1.24.0/1.25.3 — do not
+	// claim 1.31.4 support for those.
+	tag := strings.ToLower(imageTag(img))
+	return strings.HasPrefix(tag, "crnet-") || tag == "crnet-1.1.0"
+}
+
+func modulesFromEnvOverride() []string {
+	raw := strings.TrimSpace(envOr("OTEL_NGINX_SUPPORTED_MODULES", ""))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ModulesForNginxAgentImage resolves supported nginx module semvers for an agent image ref.
+func ModulesForNginxAgentImage(img string) []string {
+	if fromEnv := modulesFromEnvOverride(); len(fromEnv) > 0 {
+		return fromEnv
+	}
 	tag := imageTag(img)
 	for _, rel := range knownNginxAgentReleases {
 		if rel.Tag == tag {
@@ -54,9 +92,20 @@ func modulesForConfiguredNginxAgent() []string {
 			return out
 		}
 	}
-	// Unknown custom image: keep the conservative 1.0.4 set so we never
-	// assume a private build has every module.
+	if isCrnetWebserverAgentImage(img) {
+		out := make([]string, len(crnetNginxModuleVersions))
+		copy(out, crnetNginxModuleVersions)
+		return out
+	}
 	return []string{"1.24.0", "1.25.3"}
+}
+
+func modulesForConfiguredNginxAgent() []string {
+	return ModulesForNginxAgentImage(configuredNginxAgentImage())
+}
+
+func supportedNginxModuleVersions() []string {
+	return modulesForConfiguredNginxAgent()
 }
 
 func imageTag(image string) string {
@@ -82,6 +131,13 @@ func RecommendNginxAgentImage(nginxVersion string) (image string, ok bool) {
 	v := strings.TrimSpace(nginxVersion)
 	if v == "" {
 		return "", false
+	}
+	if isCrnetWebserverAgentImage(configuredNginxAgentImage()) {
+		for _, m := range crnetNginxModuleVersions {
+			if m == v {
+				return configuredNginxAgentImage(), true
+			}
+		}
 	}
 	base := "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd"
 	for _, rel := range knownNginxAgentReleases {
@@ -145,13 +201,30 @@ func nginxVersionFromImageTag(image string) string {
 	return extractLeadingSemver(tag)
 }
 
+func isAlpineMuslNginx(containers []corev1.Container) bool {
+	for _, c := range containers {
+		lower := strings.ToLower(c.Image)
+		if !isNginxImageRef(lower) {
+			continue
+		}
+		if strings.Contains(lower, "alpine") || strings.Contains(lower, "-musl") || strings.Contains(lower, "musl") {
+			return true
+		}
+	}
+	return false
+}
+
+func formatSupportedNginxModules(modules []string) string {
+	return "Supported nginx modules: " + strings.Join(modules, ", ")
+}
+
 // NginxInjectSupported reports whether OTel nginx inject is safe for the given version.
 func NginxInjectSupported(version string) bool {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		return false
 	}
-	for _, supported := range SupportedNginxModuleVersions {
+	for _, supported := range supportedNginxModuleVersions() {
 		if version == supported {
 			return true
 		}
@@ -161,24 +234,31 @@ func NginxInjectSupported(version string) bool {
 
 // NginxInjectBlockedReason explains why inject must not be enabled and what to do instead.
 func NginxInjectBlockedReason(version string) string {
-	supported := strings.Join(SupportedNginxModuleVersions, ", ")
+	modules := supportedNginxModuleVersions()
+	supported := strings.Join(modules, ", ")
 	agent := configuredNginxAgentImage()
+	supportedLine := formatSupportedNginxModules(modules)
 	if strings.TrimSpace(version) == "" {
 		return fmt.Sprintf(
-			"nginx version unknown; agent image %s only has modules for %s — probe a Ready pod, pin nginx:%s, or set OTEL_NGINX_IMAGE to a custom build that includes your module",
-			agent, supported, SupportedNginxModuleVersions[len(SupportedNginxModuleVersions)-1],
+			"nginx version unknown; agent image %s only has modules for %s — probe a Ready pod, pin nginx:%s, or set OTEL_NGINX_IMAGE to CRNET instrumentation-nginx. %s",
+			agent, supported, modules[len(modules)-1], supportedLine,
 		)
 	}
-	if img, ok := RecommendNginxAgentImage(version); ok {
+	if img, ok := RecommendNginxAgentImage(version); ok && img != agent {
 		return fmt.Sprintf(
-			"nginx %s needs agent image %s (current %s) — set OTEL_NGINX_IMAGE or rebuild Instrumentation",
-			version, img, agent,
+			"nginx %s needs agent image %s (current %s) — set OTEL_NGINX_IMAGE or rebuild Instrumentation. %s",
+			version, img, agent, supportedLine,
 		)
 	}
 	return fmt.Sprintf(
-		"nginx %s has no published OTel module (agent %s ships %s only). Options: rebuild app on nginx:%s, supply a custom OTEL_NGINX_IMAGE with Nginx/%s/ngx_http_opentelemetry_module.so, or leave inject off",
-		version, agent, supported, SupportedNginxModuleVersions[len(SupportedNginxModuleVersions)-1], version,
+		"nginx %s has no OTel module in agent %s (%s). Rebuild on nginx:%s, extend instrumentation-nginx, or leave inject off. %s",
+		version, agent, supported, modules[len(modules)-1], supportedLine,
 	)
+}
+
+func alpineNginxBlockedReason() string {
+	return "Alpine/musl nginx cannot load glibc-built OTel modules (ngx_http_opentelemetry_module.so). Use a Debian/RHEL-based nginx image or leave inject off. " +
+		formatSupportedNginxModules(supportedNginxModuleVersions())
 }
 
 func resolveNginxVersionFromContainers(containers []corev1.Container) string {
@@ -207,6 +287,13 @@ func resolveNginxVersionFromContainers(containers []corev1.Container) string {
 
 // NginxInjectStatus resolves nginx version and reports inject compatibility.
 func NginxInjectStatus(containers []corev1.Container, probedVersion string) (version string, compatible bool, blockedReason string) {
+	if isAlpineMuslNginx(containers) {
+		version = resolveNginxVersionFromContainers(containers)
+		if version == "" {
+			version = strings.TrimSpace(probedVersion)
+		}
+		return version, false, alpineNginxBlockedReason()
+	}
 	version = resolveNginxVersionFromContainers(containers)
 	if version == "" {
 		version = strings.TrimSpace(probedVersion)

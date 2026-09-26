@@ -338,12 +338,21 @@ func (h *Handler) GetClusterApplications(c *fiber.Ctx) error {
 			"statusReason":     w.StatusReason,
 			"statusMessage":    w.StatusMessage,
 		}
-		if strings.EqualFold(lang, "nginx") || strings.EqualFold(detected, "nginx") {
-			app["nginxVersion"] = w.NginxVersion
+		if strings.EqualFold(lang, "nginx") || strings.EqualFold(detected, "nginx") ||
+			strings.EqualFold(lang, "apache-httpd") || strings.EqualFold(detected, "apache-httpd") {
 			app["injectCompatible"] = w.InjectCompatible
+			if w.SupportedModuleVersions != "" {
+				app["supportedModuleVersions"] = w.SupportedModuleVersions
+			}
 			if w.InjectBlockedReason != "" {
 				app["injectBlockedReason"] = w.InjectBlockedReason
 			}
+		}
+		if strings.EqualFold(lang, "nginx") || strings.EqualFold(detected, "nginx") {
+			app["nginxVersion"] = w.NginxVersion
+		}
+		if strings.EqualFold(lang, "apache-httpd") || strings.EqualFold(detected, "apache-httpd") {
+			app["apacheVersion"] = w.ApacheVersion
 		}
 		applications = append(applications, app)
 	}
