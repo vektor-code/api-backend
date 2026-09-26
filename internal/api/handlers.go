@@ -725,6 +725,10 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 		MemoryUsage         float64           `json:"memoryUsage"` // in MB
 		MemoryLimit         float64           `json:"memoryLimit"` // in MB
 		RestartCount        int               `json:"restartCount"`
+		Ready               bool              `json:"ready"`
+		StatusReason        string            `json:"statusReason,omitempty"`
+		StatusMessage       string            `json:"statusMessage,omitempty"`
+		ContainerImages     []string          `json:"containerImages,omitempty"`
 		Language            string            `json:"language"`
 		Instrumented        bool              `json:"instrumented"`
 		InstrumentationType string            `json:"instrumentationType"`
@@ -732,9 +736,12 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 	}
 
 	var enrichedPods []PodMetricInfo
+	// Agent-reported pods carry real metrics-server usage; do not overwrite below.
+	fromAgent := false
 
 	remotePods := h.store.GetReportedPods(ns)
 	if len(remotePods) > 0 {
+		fromAgent = true
 		for _, p := range remotePods {
 			enrichedPods = append(enrichedPods, PodMetricInfo{
 				Name:                p.Name,
@@ -747,6 +754,10 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 				MemoryUsage:         p.MemoryUsage,
 				MemoryLimit:         p.MemoryLimit,
 				RestartCount:        p.RestartCount,
+				Ready:               p.Ready,
+				StatusReason:        p.StatusReason,
+				StatusMessage:       p.StatusMessage,
+				ContainerImages:     p.ContainerImages,
 				Language:            p.Language,
 				Instrumented:        p.Instrumented,
 				InstrumentationType: p.InstrumentationType,
@@ -844,6 +855,20 @@ func (h *Handler) GetPods(c *fiber.Ctx) error {
 			}
 		}
 		enrichedPods = visible
+	}
+
+	// Synthetic usage only when pods lack agent metrics (watcher, trace, or demo fallback).
+	if fromAgent {
+		var filteredPods []PodMetricInfo
+		for _, p := range enrichedPods {
+			if !h.store.IsNamespaceDisabled(p.Namespace) {
+				filteredPods = append(filteredPods, p)
+			}
+		}
+		return c.JSON(fiber.Map{
+			"pods":  filteredPods,
+			"count": len(filteredPods),
+		})
 	}
 
 	// Calculate and assign resource stats for each pod dynamically

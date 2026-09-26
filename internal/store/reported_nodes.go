@@ -12,6 +12,10 @@ type ReportedNode struct {
 	CpuUsage          float64 `json:"cpuUsage"`
 	MemoryUsage       float64 `json:"memoryUsage"`
 	MetricsAvailable  bool    `json:"metricsAvailable"`
+	CloudProvider     string  `json:"cloudProvider,omitempty"`
+	Region            string  `json:"region,omitempty"`
+	Zone              string  `json:"zone,omitempty"`
+	InstanceType      string  `json:"instanceType,omitempty"`
 }
 
 func (s *Store) SetReportedNodes(nodes []ReportedNode) {

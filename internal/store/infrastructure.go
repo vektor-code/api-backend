@@ -62,6 +62,10 @@ type InfraNode struct {
 	Restarts         int     `json:"restarts"`
 	AtRisk           int     `json:"atRisk"`
 	MetricsAvailable bool    `json:"metricsAvailable"`
+	CloudProvider    string  `json:"cloudProvider,omitempty"`
+	Region           string  `json:"region,omitempty"`
+	Zone             string  `json:"zone,omitempty"`
+	InstanceType     string  `json:"instanceType,omitempty"`
 }
 
 // InfraSummary is the cluster-wide rollup for the header tiles.
@@ -126,6 +130,10 @@ func (s *Store) GetInfrastructureMetrics(namespace string, allowedNs []string) *
 			PodCapacity:      rn.PodCapacity,
 			PodAllocatable:   rn.PodAllocatable,
 			MetricsAvailable: rn.MetricsAvailable,
+			CloudProvider:    rn.CloudProvider,
+			Region:           rn.Region,
+			Zone:             rn.Zone,
+			InstanceType:     rn.InstanceType,
 		}
 		out.Summary.CpuCapacity += rn.CpuCapacity
 		out.Summary.CpuAllocatable += rn.CpuAllocatable
@@ -318,6 +326,10 @@ func dedupeReportedNodes(nodes []ReportedNode) []ReportedNode {
 		if current.Role == "" {
 			current.Role = node.Role
 		}
+		current.CloudProvider = firstNonEmpty(current.CloudProvider, node.CloudProvider)
+		current.Region = firstNonEmpty(current.Region, node.Region)
+		current.Zone = firstNonEmpty(current.Zone, node.Zone)
+		current.InstanceType = firstNonEmpty(current.InstanceType, node.InstanceType)
 		current.CpuAllocatable = maxFloat(current.CpuAllocatable, node.CpuAllocatable)
 		current.MemoryCapacity = maxFloat(current.MemoryCapacity, node.MemoryCapacity)
 		current.MemoryAllocatable = maxFloat(current.MemoryAllocatable, node.MemoryAllocatable)

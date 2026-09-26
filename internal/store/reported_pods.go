@@ -26,6 +26,7 @@ type ReportedPod struct {
 	DatabaseHost        string            `json:"databaseHost"`
 	DatabasePort        string            `json:"databasePort"`
 	IsFrontend          bool              `json:"isFrontend"`
+	ContainerImages     []string          `json:"containerImages,omitempty"`
 }
 
 var reportedPodServiceLabels = [...]string{"app.kubernetes.io/name", "app", "service", "k8s-app"}
